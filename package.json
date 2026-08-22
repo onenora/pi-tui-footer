@@ -1,0 +1,24 @@
+{
+	"name": "pi-tui-footer",
+	"version": "1.0.0",
+	"description": "pi extension: TUI footer/header with git status, telemetry, rounded tools, editor and settings enhancements",
+	"type": "module",
+	"keywords": [
+		"pi-package",
+		"pi-extension",
+		"tui"
+	],
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/onenora/pi-tui-footer.git"
+	},
+	"pi": {
+		"extensions": ["./extensions"]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-ai": "*",
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*"
+	}
+}
