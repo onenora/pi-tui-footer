@@ -59,6 +59,13 @@ export function finiteOrZero(value: unknown): number {
 	return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
+export function formatInputBreakdown(uncached: number, cacheRead: number): string {
+	const total = fmtTokens(uncached + cacheRead);
+	return cacheRead > 0
+		? `${total} (U ${fmtTokens(uncached)} + R ${fmtTokens(cacheRead)})`
+		: total;
+}
+
 export function fmtTokens(n: number): string {
 	if (n < 1000) return n.toString();
 	if (n < 10_000) return `${(n / 1000).toFixed(1)}k`;

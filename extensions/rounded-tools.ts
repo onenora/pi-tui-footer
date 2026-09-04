@@ -55,6 +55,9 @@ class RoundedFrame implements Component {
 
 	invalidate(): void {
 		this.inner.invalidate?.();
+		this.cachedWidth = undefined;
+		this.cachedInnerLines = undefined;
+		this.cachedLines = undefined;
 	}
 
 	// pi's built-in tool renderers cache the previously-returned component
@@ -86,8 +89,32 @@ class RoundedFrame implements Component {
 		}
 
 		const innerWidth = Math.max(1, width - 4); // │ + space + content + space + │
-		const horizontal = "─".repeat(Math.max(0, width - 2));
 		const innerLines = this.inner.render(innerWidth);
+
+		// pi's TUI re-renders every transcript component on every render
+		// cycle (each keystroke), but built-in components below us (e.g.
+		// `Text`, `Box`) cache their rendered line arrays and return the
+		// same array reference when content and width haven't changed.
+		// Without a cache here, every keystroke re-runs `visibleWidth()`
+		// (ANSI parsing) and string building for every line of every
+		// framed tool entry — O(N_session) per keypress, visible as input
+		// lag on long sessions.
+		//
+		// Cache key: `width` plus the array reference returned by
+		// `inner.render()`. Built-in Text/Box return the same reference on
+		// cache hits and a fresh array whenever their content changes
+		// (e.g. Ctrl+O expand), so reference equality is a reliable change
+		// signal. `invalidate()` (theme changes etc.) clears the cache
+		// explicitly, and so does an actual `width` change.
+		if (
+			this.cachedLines &&
+			this.cachedWidth === width &&
+			this.cachedInnerLines === innerLines
+		) {
+			return this.cachedLines;
+		}
+
+		const horizontal = "─".repeat(Math.max(0, width - 2));
 		const side = this.border("│");
 
 		const out: string[] = [];
@@ -113,8 +140,15 @@ class RoundedFrame implements Component {
 		if (this.mode !== "open-bottom") {
 			out.push(this.border("╰" + horizontal + "╯"));
 		}
+		this.cachedWidth = width;
+		this.cachedInnerLines = innerLines;
+		this.cachedLines = out;
 		return out;
 	}
+
+	private cachedWidth: number | undefined;
+	private cachedInnerLines: string[] | undefined;
+	private cachedLines: string[] | undefined;
 }
 
 const frame = (
