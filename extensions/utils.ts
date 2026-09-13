@@ -1,15 +1,22 @@
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-ai";
 import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import {
+	stripTerminalSequences as stripTerminalSequencesFromTui,
+	truncateToWidth,
+	visibleWidth,
+} from "@earendil-works/pi-tui";
 
 export { truncateToWidth, visibleWidth };
 
+// pi-tui handles the common ANSI/OSC/APC forms. Keep a generic CSI pass for
+// valid sequences whose final byte is outside its intentionally narrow set.
+const CSI_SEQUENCE = /(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]/g;
+
 export function stripAnsi(text: string): string {
-	return text
-		.replace(/\x1b\[[0-9;]*m/g, "")
-		.replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
-		.replace(/\x1b_[^\x07]*\x07/g, "");
+	// Remove CSI first so pi-tui's parser cannot mistake an unsupported CSI
+	// final byte for part of a later sequence and swallow intervening text.
+	return stripTerminalSequencesFromTui(text.replace(CSI_SEQUENCE, ""));
 }
 
 export function formatCwd(cwd: string): string {
@@ -232,6 +239,7 @@ export function effortColor(level: ThinkingLevel | string | undefined): ThemeCol
 }
 
 export function isEditorBorderLine(line: string): boolean {
+	if (typeof line !== "string") return false;
 	const plain = stripAnsi(line);
 	if (/^─+$/.test(plain)) return true;
 	if (/^─*\s*[↑↓]\s+\d+\s+more\s*─*$/.test(plain)) return true;
@@ -240,7 +248,8 @@ export function isEditorBorderLine(line: string): boolean {
 
 export function findBottomBorderIndex(lines: string[]): number {
 	for (let i = lines.length - 1; i >= 1; i--) {
-		if (isEditorBorderLine(lines[i]!)) return i;
+		const line = lines[i];
+		if (line !== undefined && isEditorBorderLine(line)) return i;
 	}
 	return Math.max(0, lines.length - 1);
 }
