@@ -2,9 +2,9 @@
  * Rounded tool frames (merged port) — rounded frames for tool calls and results.
  *
  * Merged 2026-08 from the standalone local extension rounded-tools.ts (a
- * localized copy of npm:pi-rounded-tools@0.1.2, MIT, by OrionPax,
- * https://github.com/orionpax1997/pi-rounded-tools), now part of pi-tui
- * (based on https://github.com/OldSuns/pi-open-tui v0.2.11, MIT, by
+ * localized copy of npm:pi-rounded-tools@0.1.3, MIT, by OrionPax,
+ * https://github.com/orionpax1997/pi-rounded-tools), integrated into pi-tui
+ * (based on https://github.com/OldSuns/pi-open-tui v0.3.7, MIT, by
  * OldSun) and gated behind `roundedTools` in pi-tui config
  * (~/.pi/agent/pi-tui.json, default on).
  *

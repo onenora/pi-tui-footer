@@ -1,3 +1,19 @@
+/**
+ * pi-tui-footer — full TUI polish for pi: Pi logo header,
+ * Starship-style footer, rounded editor with embedded working status,
+ * thinking peek preview, rounded tool frames, and turn telemetry.
+ *
+ * Integrated from:
+ *   - pi-open-tui (v0.3.7, MIT, by OldSun, https://github.com/OldSuns/pi-open-tui)
+ *   - pi-rounded-tools (v0.1.3, MIT, by OrionPax, https://github.com/orionpax1997/pi-rounded-tools)
+ *
+ * Security audit notes:
+ *   - zero third-party runtime deps (pi core bundles + node built-ins only)
+ *   - execFile runs only hardcoded git / runtime version commands (no shell
+ *     injection surface); fs access limited to ~/.pi/agent/pi-tui.json
+ *   - no network / eval / obfuscation / credential reads
+ */
+
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type OpenTuiConfig, DEFAULT_CONFIG, ensureConfigExists, loadConfig, saveConfig } from "./config.ts";
 import { installEditor } from "./editor.ts";
