@@ -249,3 +249,21 @@ export function registerRoundedTools(pi: ExtensionAPI, enabled: boolean, cwd: st
 		pi.registerTool(enabled ? wrapBuiltin(def) : def);
 	}
 }
+
+/**
+ * Manager class encapsulating rounded tools registration and lifecycle updates.
+ */
+export class RoundedToolsManager {
+	constructor(private readonly pi: ExtensionAPI) {}
+
+	/** Register initial tools before session_start with fallback cwd. */
+	init(enabled: boolean, cwd = process.cwd()): void {
+		registerRoundedTools(this.pi, enabled, cwd);
+	}
+
+	/** Apply tools with current session cwd. */
+	apply(enabled: boolean, cwd: string): void {
+		registerRoundedTools(this.pi, enabled, cwd);
+	}
+}
+

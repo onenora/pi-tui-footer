@@ -16,6 +16,12 @@
 	"pi": {
 		"extensions": ["./extensions"]
 	},
+	"scripts": {
+		"check": "bun -e 'import * as index from \"./extensions/index.ts\"; import * as tools from \"./extensions/rounded-tools.ts\"; console.log(\"All extension modules passed integrity check.\");'",
+		"sync": "bun scripts/sync-upstream.ts",
+		"sync:check": "bun scripts/sync-upstream.ts --check",
+		"sync:apply": "bun scripts/sync-upstream.ts --apply"
+	},
 	"peerDependencies": {
 		"@earendil-works/pi-ai": "*",
 		"@earendil-works/pi-coding-agent": "*",

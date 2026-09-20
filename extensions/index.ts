@@ -21,7 +21,7 @@ import { installFooter } from "./footer.ts";
 import { installHeader } from "./header.ts";
 import { emptyGitStatus, readGitStatus } from "./git.ts";
 import { readRuntimeInfo } from "./runtime.ts";
-import { registerRoundedTools } from "./rounded-tools.ts";
+import { RoundedToolsManager } from "./rounded-tools.ts";
 import { SessionLifecycle } from "./session-lifecycle.ts";
 import { registerSettingsCommand } from "./settings-command.ts";
 import { formatTurnTelemetry, TurnTelemetryTracker } from "./telemetry.ts";
@@ -63,6 +63,7 @@ export default function (pi: ExtensionAPI) {
 	const sessionLifecycle = new SessionLifecycle();
 	const state: FooterState = createInitialState();
 	const turnTelemetry = new TurnTelemetryTracker();
+	const roundedTools = new RoundedToolsManager(pi);
 
 	let config: OpenTuiConfig = structuredClone(DEFAULT_CONFIG);
 	let active = false;
@@ -215,8 +216,7 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	const applyRoundedTools = (ctx: ExtensionContext) => {
-		const want = config.enabled && config.roundedTools;
-		registerRoundedTools(pi, want, ctx.cwd);
+		roundedTools.apply(config.enabled && config.roundedTools, ctx.cwd);
 	};
 
 	// Register rounded tool renderers at load time (before session_start) so a
@@ -229,7 +229,7 @@ export default function (pi: ExtensionAPI) {
 	// (compaction / resume / tree navigation / thinking-block toggle).
 	const initialConfig = loadConfig();
 	config = initialConfig;
-	registerRoundedTools(pi, initialConfig.enabled && initialConfig.roundedTools, process.cwd());
+	roundedTools.init(initialConfig.enabled && initialConfig.roundedTools);
 
 	const refreshInteractiveState = (ctx: ExtensionContext, project = false) => {
 		if (!sessionLifecycle.isCurrent() || !ctx.hasUI) return;
