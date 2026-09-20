@@ -10,7 +10,7 @@ import {
 	type TUI,
 	Text,
 } from "@earendil-works/pi-tui";
-import type { CursorStyle, IconMode, PiTuiConfig, SettingsLanguage } from "./config.ts";
+import type { CursorStyle, IconMode, OpenTuiConfig, SettingsLanguage, ThinkingPeekLines } from "./config.ts";
 import {
 	DEFAULT_FULLSCREEN_WHEEL_SCROLL_LINES,
 	normalizeFullscreenWheelScrollLines,
@@ -34,11 +34,13 @@ const COPY = {
 		labels: {
 			enabled: "Enabled",
 			roundedTools: "Rounded tool frames",
+			thinkingPeek: "Thinking peek",
 			language: "Language",
 			wheelScrollLines: "Mouse wheel speed",
 			cursorStyle: "Cursor style",
 			iconMode: "Icon mode",
 			cwd: "CWD",
+			hostname: "Hostname",
 			sessionName: "Session name",
 			gitBranch: "Git branch",
 			gitStatus: "Git status",
@@ -48,6 +50,7 @@ const COPY = {
 			tokens: "Tokens",
 			cost: "Cost",
 			extensionStatuses: "Extension status line",
+			capitalizeProviderName: "Capitalize provider name",
 			totalDuration: "Total duration",
 			tokenCounts: "Token counts",
 			stallDetails: "Stall details",
@@ -56,6 +59,7 @@ const COPY = {
 		values: {
 			on: "On",
 			off: "Off",
+			thinkingPeek: { off: "Off", one: "1 line", two: "2 lines" },
 			languages: { en: "English", zh: "简体中文" },
 			wheelLines: (count: number) => `${count} ${count === 1 ? "line" : "lines"} / notch`,
 			wheelPrompt: (count: number) => `Wheel scroll lines per notch, 1-10 (current: ${count}). Enter: apply · Esc: cancel`,
@@ -69,12 +73,14 @@ const COPY = {
 		hint: "Tab/Shift+Tab/←/→：切页 · ↑/↓：移动 · Enter/Space：更改 · 滚轮速度项 Enter 输入 1-10 · Esc/q：关闭",
 		labels: {
 			enabled: "启用",
-			roundedTools: "圆角工具框",
+			roundedTools: "圆角工具边框",
+			thinkingPeek: "思考预览",
 			language: "语言",
 			wheelScrollLines: "鼠标滚轮速度",
 			cursorStyle: "光标样式",
 			iconMode: "图标模式",
 			cwd: "当前目录",
+			hostname: "主机名",
 			sessionName: "会话名",
 			gitBranch: "Git 分支",
 			gitStatus: "Git 状态",
@@ -84,6 +90,7 @@ const COPY = {
 			tokens: "Token",
 			cost: "费用",
 			extensionStatuses: "扩展状态行",
+			capitalizeProviderName: "提供商名称首字母大写",
 			totalDuration: "总耗时",
 			tokenCounts: "Token 数量",
 			stallDetails: "停顿详情",
@@ -92,6 +99,7 @@ const COPY = {
 		values: {
 			on: "开启",
 			off: "关闭",
+			thinkingPeek: { off: "关闭", one: "单行", two: "双行" },
 			languages: { en: "English", zh: "简体中文" },
 			wheelLines: (count: number) => `每格 ${count} 行`,
 			wheelPrompt: (count: number) => `滚轮每格滚动行数（当前 ${count}，范围 1-10），输入后 Enter 应用 · Esc 取消`,
@@ -103,7 +111,12 @@ const COPY = {
 
 type SettingsCopy = (typeof COPY)[SettingsLanguage];
 
-function toggleSetting(config: PiTuiConfig, key: keyof PiTuiConfig["footerSegments"]): PiTuiConfig {
+function formatThinkingPeekLines(lines: ThinkingPeekLines, copy: SettingsCopy): string {
+	const values = [copy.values.thinkingPeek.off, copy.values.thinkingPeek.one, copy.values.thinkingPeek.two];
+	return values[lines] ?? values[0];
+}
+
+function toggleSetting(config: OpenTuiConfig, key: keyof OpenTuiConfig["footerSegments"]): OpenTuiConfig {
 	return {
 		...config,
 		footerSegments: {
@@ -113,33 +126,29 @@ function toggleSetting(config: PiTuiConfig, key: keyof PiTuiConfig["footerSegmen
 	};
 }
 
-function cycleIconMode(config: PiTuiConfig): PiTuiConfig {
+function cycleIconMode(config: OpenTuiConfig): OpenTuiConfig {
 	const order: IconMode[] = ["auto", "nerd", "ascii"];
 	const currentIdx = order.indexOf(config.icons.mode);
 	const next = order[(currentIdx + 1) % order.length]!;
 	return { ...config, icons: { mode: next } };
 }
 
-function toggleEnabled(config: PiTuiConfig): PiTuiConfig {
+function toggleEnabled(config: OpenTuiConfig): OpenTuiConfig {
 	return { ...config, enabled: !config.enabled };
 }
 
-function toggleRoundedTools(config: PiTuiConfig): PiTuiConfig {
-	return { ...config, roundedTools: !config.roundedTools };
-}
-
-function toggleLanguage(config: PiTuiConfig): PiTuiConfig {
+function toggleLanguage(config: OpenTuiConfig): OpenTuiConfig {
 	return { ...config, settingsLanguage: config.settingsLanguage === "en" ? "zh" : "en" };
 }
 
-function cycleCursorStyle(config: PiTuiConfig): PiTuiConfig {
+function cycleCursorStyle(config: OpenTuiConfig): OpenTuiConfig {
 	const order: CursorStyle[] = ["block", "bar", "underline"];
 	const currentIdx = order.indexOf(config.cursorStyle);
 	const next = order[(currentIdx + 1) % order.length]!;
 	return { ...config, cursorStyle: next };
 }
 
-function setWheelScrollLines(config: PiTuiConfig, raw: string): PiTuiConfig | undefined {
+function setWheelScrollLines(config: OpenTuiConfig, raw: string): OpenTuiConfig | undefined {
 	if (!/^\d+$/.test(raw)) return undefined;
 	const parsed = Number(raw);
 	const bounded = Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER;
@@ -152,38 +161,49 @@ function setWheelScrollLines(config: PiTuiConfig, raw: string): PiTuiConfig | un
 	};
 }
 
-function toggleTelemetry(config: PiTuiConfig, key: keyof PiTuiConfig["telemetry"]): PiTuiConfig {
+function toggleTelemetry(config: OpenTuiConfig, key: keyof OpenTuiConfig["telemetry"]): OpenTuiConfig {
 	return {
 		...config,
 		telemetry: { ...config.telemetry, [key]: !config.telemetry[key] },
 	};
 }
 
-function buildFeaturesItems(config: PiTuiConfig, copy: SettingsCopy): SettingItem[] {
+function cycleThinkingPeek(config: OpenTuiConfig): OpenTuiConfig {
+	const next = ([1, 2, 0] as const)[config.thinkingPeek.lines] ?? 0;
+	return {
+		...config,
+		thinkingPeek: { lines: next },
+	};
+}
+
+function buildFeaturesItems(config: OpenTuiConfig, copy: SettingsCopy): SettingItem[] {
+	const flag = (value: boolean) => value ? copy.values.on : copy.values.off;
 	return [
-		{ id: "enabled", label: copy.labels.enabled, currentValue: config.enabled ? copy.values.on : copy.values.off },
-		{ id: "roundedTools", label: copy.labels.roundedTools, currentValue: config.roundedTools ? copy.values.on : copy.values.off },
+		{ id: "enabled", label: copy.labels.enabled, currentValue: flag(config.enabled) },
+		{ id: "roundedTools", label: copy.labels.roundedTools, currentValue: flag(config.roundedTools) },
 		{ id: "settingsLanguage", label: copy.labels.language, currentValue: copy.values.languages[config.settingsLanguage] },
 		{
 			id: "wheelScrollLines",
 			label: copy.labels.wheelScrollLines,
 			currentValue: copy.values.wheelLines(config.fullscreen.wheelScrollLines),
 		},
+		{ id: "thinkingPeek", label: copy.labels.thinkingPeek, currentValue: formatThinkingPeekLines(config.thinkingPeek.lines, copy) },
 	];
 }
 
-function buildIconsItems(config: PiTuiConfig, copy: SettingsCopy): SettingItem[] {
+function buildIconsItems(config: OpenTuiConfig, copy: SettingsCopy): SettingItem[] {
 	return [
 		{ id: "mode", label: copy.labels.iconMode, currentValue: copy.values.icons[config.icons.mode] },
 		{ id: "cursorStyle", label: copy.labels.cursorStyle, currentValue: copy.values.cursorStyles[config.cursorStyle] },
 	];
 }
 
-function buildSegmentsItems(config: PiTuiConfig, copy: SettingsCopy): SettingItem[] {
+function buildSegmentsItems(config: OpenTuiConfig, copy: SettingsCopy): SettingItem[] {
 	const segs = config.footerSegments;
 	const flag = (value: boolean) => value ? copy.values.on : copy.values.off;
 	return [
 		{ id: "cwd", label: copy.labels.cwd, currentValue: flag(segs.cwd) },
+		{ id: "hostname", label: copy.labels.hostname, currentValue: flag(segs.hostname) },
 		{ id: "sessionName", label: copy.labels.sessionName, currentValue: flag(segs.sessionName) },
 		{ id: "gitBranch", label: copy.labels.gitBranch, currentValue: flag(segs.gitBranch) },
 		{ id: "gitStatus", label: copy.labels.gitStatus, currentValue: flag(segs.gitStatus) },
@@ -193,10 +213,11 @@ function buildSegmentsItems(config: PiTuiConfig, copy: SettingsCopy): SettingIte
 		{ id: "tokens", label: copy.labels.tokens, currentValue: flag(segs.tokens) },
 		{ id: "cost", label: copy.labels.cost, currentValue: flag(segs.cost) },
 		{ id: "extensionStatuses", label: copy.labels.extensionStatuses, currentValue: flag(segs.extensionStatuses) },
+		{ id: "capitalizeProviderName", label: copy.labels.capitalizeProviderName, currentValue: flag(segs.capitalizeProviderName) },
 	];
 }
 
-function buildTelemetryItems(config: PiTuiConfig, copy: SettingsCopy): SettingItem[] {
+function buildTelemetryItems(config: OpenTuiConfig, copy: SettingsCopy): SettingItem[] {
 	const telemetry = config.telemetry;
 	const flag = (value: boolean) => value ? copy.values.on : copy.values.off;
 	return [
@@ -210,7 +231,7 @@ function buildTelemetryItems(config: PiTuiConfig, copy: SettingsCopy): SettingIt
 	];
 }
 
-function buildItems(tab: Tab, config: PiTuiConfig): SettingItem[] {
+function buildItems(tab: Tab, config: OpenTuiConfig): SettingItem[] {
 	const copy = COPY[config.settingsLanguage];
 	switch (tab) {
 		case "features": return buildFeaturesItems(config, copy);
@@ -223,22 +244,23 @@ function buildItems(tab: Tab, config: PiTuiConfig): SettingItem[] {
 function handleSettingChange(
 	tab: Tab,
 	itemId: string,
-	config: PiTuiConfig,
-): PiTuiConfig {
+	config: OpenTuiConfig,
+): OpenTuiConfig {
 	if (tab === "features") {
 		if (itemId === "enabled") return toggleEnabled(config);
-		if (itemId === "roundedTools") return toggleRoundedTools(config);
+		if (itemId === "roundedTools") return { ...config, roundedTools: !config.roundedTools };
 		if (itemId === "settingsLanguage") return toggleLanguage(config);
+		if (itemId === "thinkingPeek") return cycleThinkingPeek(config);
 	}
 	if (tab === "icons") {
 		if (itemId === "mode") return cycleIconMode(config);
 		if (itemId === "cursorStyle") return cycleCursorStyle(config);
 	}
 	if (tab === "segments") {
-		return toggleSetting(config, itemId as keyof PiTuiConfig["footerSegments"]);
+		return toggleSetting(config, itemId as keyof OpenTuiConfig["footerSegments"]);
 	}
 	if (tab === "telemetry") {
-		return toggleTelemetry(config, itemId as keyof PiTuiConfig["telemetry"]);
+		return toggleTelemetry(config, itemId as keyof OpenTuiConfig["telemetry"]);
 	}
 	return config;
 }
@@ -268,12 +290,12 @@ function insertComponentAfter(list: Component, child: Component, index: () => nu
 
 class SettingsUi implements SettingsUiHandle {
 	private tab: Tab = "features";
-	private config: PiTuiConfig;
+	private config: OpenTuiConfig;
 	private selectList: SelectList;
 	private readonly selectedItemByTab: Partial<Record<Tab, string>> = {};
 	private readonly container: Box;
 	private readonly theme: Theme;
-	private readonly onChange: (config: PiTuiConfig) => void;
+	private readonly onChange: (config: OpenTuiConfig) => void;
 	private readonly onClose: () => void;
 	private cachedWidth: number | undefined;
 	private cachedLines: string[] | undefined;
@@ -282,8 +304,8 @@ class SettingsUi implements SettingsUiHandle {
 
 	constructor(
 		theme: Theme,
-		config: PiTuiConfig,
-		onChange: (config: PiTuiConfig) => void,
+		config: OpenTuiConfig,
+		onChange: (config: OpenTuiConfig) => void,
 		onClose: () => void,
 	) {
 		this.theme = theme;
@@ -362,7 +384,7 @@ class SettingsUi implements SettingsUiHandle {
 				description: editing || this.compact ? undefined : item.currentValue,
 			} as SelectItem;
 		});
-		this.selectList = new SelectList(items, Math.min(items.length, 10), {
+		this.selectList = new SelectList(items, Math.min(items.length, 12), {
 			selectedPrefix: (t) => this.theme.fg("accent", t),
 			selectedText: (t) => this.theme.fg("accent", t),
 			description: (t) => this.theme.fg("muted", t),
@@ -453,35 +475,37 @@ class SettingsUi implements SettingsUiHandle {
 export function registerSettingsCommand(
 	pi: ExtensionAPI,
 	hooks: {
-		getConfig: () => PiTuiConfig;
-		onConfigChanged: (config: PiTuiConfig) => void;
+		getConfig: () => OpenTuiConfig;
+		onConfigChanged: (config: OpenTuiConfig) => void;
 		onOverlayClosed?: () => void;
 	},
 ): void {
-	pi.registerCommand("pi-tui", {
-		description: "Open the pi-tui settings UI",
-		handler: async (_args, ctx: ExtensionContext) => {
+	const commandDef = {
+		description: "Open the Pi TUI settings UI",
+		handler: async (_args: string, ctx: ExtensionContext) => {
 			if (!ctx.hasUI) return;
-		await ctx.ui.custom<void>((tui: TUI, theme, _kb, done) => {
-			const ui = new SettingsUi(
-				theme,
-				hooks.getConfig(),
-				(config) => hooks.onConfigChanged(config),
-				() => done(undefined),
-			);
-			return {
-				render: (w: number) => ui.render(w),
-				invalidate: () => ui.invalidate(),
-				handleInput: (data: string) => {
-					ui.handleInput(data);
-					tui.requestRender();
-				},
-			};
-		}, { overlay: true });
-		// Overlay is closed and focus is back on the editor. Deferred UI changes
-		// (e.g. toggling the extension) run here, so pi core's focus restore
-		// cannot strand the overlay without keyboard input.
-		hooks.onOverlayClosed?.();
+			await ctx.ui.custom<void>((tui: TUI, theme, _kb, done) => {
+				const ui = new SettingsUi(
+					theme,
+					hooks.getConfig(),
+					(config) => hooks.onConfigChanged(config),
+					() => done(undefined),
+				);
+				return {
+					render: (w: number) => ui.render(w),
+					invalidate: () => ui.invalidate(),
+					handleInput: (data: string) => {
+						ui.handleInput(data);
+						tui.requestRender();
+					},
+				};
+			}, { overlay: true });
+			// Overlay is closed and focus is back on the editor. Deferred UI changes
+			// (e.g. toggling the extension) run here, so pi core's focus restore
+			// cannot strand the overlay without keyboard input.
+			hooks.onOverlayClosed?.();
 		},
-	});
+	};
+	pi.registerCommand("pi-tui", commandDef);
+	pi.registerCommand("open-tui", commandDef);
 }

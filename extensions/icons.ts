@@ -2,6 +2,7 @@ export type IconMode = "auto" | "nerd" | "ascii";
 
 export interface IconGlyphs {
 	cwd: string;
+	host: string;
 	session: string;
 	git: string;
 	working: string;
@@ -31,6 +32,7 @@ export interface IconGlyphs {
 
 const NERD_GLYPHS: IconGlyphs = {
 	cwd: "",
+	host: "",
 	session: "",
 	git: "",
 	working: "",
@@ -64,6 +66,7 @@ const NERD_GLYPHS: IconGlyphs = {
 // avoid collisions with the git-status set {= S ! A ? r x ^ v}.
 const ASCII_GLYPHS: IconGlyphs = {
 	cwd: "@",
+	host: "h",
 	session: "s",
 	git: "*",
 	working: "o",
@@ -91,33 +94,13 @@ const ASCII_GLYPHS: IconGlyphs = {
 	deleted: "x",
 };
 
-const NERD_FONT_TERMINALS = new Set([
-	"iTerm.app",
-	"Ghostty",
-	"WezTerm",
-	"kitty",
-	"rio",
-	"tabby",
-	"WindowsTerminal",
-	"vscode",
-]);
-
 export function detectNerdFont(): boolean {
-	const termProgram = process.env.TERM_PROGRAM;
-	if (termProgram && NERD_FONT_TERMINALS.has(termProgram)) return true;
-
-	const lcTerminal = process.env.LC_TERMINAL;
-	if (lcTerminal && NERD_FONT_TERMINALS.has(lcTerminal)) return true;
-
-	if (process.env.TERM === "xterm-kitty") return true;
-
-	// Windows Terminal sets WT_SESSION (not TERM_PROGRAM)
-	if (process.env.WT_SESSION) return true;
-
-	// VS Code integrated terminal
-	if (process.env.TERM_PROGRAM === "vscode") return true;
-
-	return false;
+	// TTY and locale checks are the only reliable signals available here. The
+	// terminal emulator owns font selection, so auto mode is optimistic once
+	// output is an interactive UTF-8 TTY.
+	if (process.env.TERM === "dumb" || process.stdout.isTTY !== true) return false;
+	const locale = [process.env.LC_ALL, process.env.LC_CTYPE, process.env.LANG].find(Boolean);
+	return locale === undefined || /utf-?8/i.test(locale);
 }
 
 export function resolveIconMode(mode: IconMode): "nerd" | "ascii" {

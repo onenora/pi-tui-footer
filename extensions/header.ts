@@ -14,7 +14,6 @@ import {
 } from "./utils.ts";
 
 const LOGO_CELL = "███";
-const LOGO_ANIMATION_INTERVAL_MS = 120;
 
 type LogoColor = "panel" | "cyan" | "red" | "green" | "orange" | "white" | "flash" | "brand";
 type LogoFrame = { phase: number; active: "left" | "top" | "right" | "none"; ax: number; ay: number; flash: boolean; white: boolean };
@@ -88,19 +87,14 @@ function logoCellColor(frame: LogoFrame, y: number, x: number): LogoColor {
 
 function colorCell(color: LogoColor, paintBrand: (text: string) => string): string {
 	switch (color) {
-		case "cyan":
-		case "red":
-		case "green":
+		case "cyan": return `\x1b[36m${LOGO_CELL}\x1b[39m`;
+		case "red": return `\x1b[31m${LOGO_CELL}\x1b[39m`;
+		case "green": return `\x1b[32m${LOGO_CELL}\x1b[39m`;
 		case "orange":
-		case "flash":
-		case "white":
-		case "brand":
-			// Local change: all logo cells render in the thinkingHigh purple
-			// (the color used for the "high" thinking level) instead of the
-			// upstream multicolor red/cyan/green installer palette.
-			return paintBrand(LOGO_CELL);
-		default:
-			return " ".repeat(LOGO_CELL.length);
+		case "flash": return `\x1b[33m${LOGO_CELL}\x1b[39m`;
+		case "white": return `\x1b[39m${LOGO_CELL}`;
+		case "brand": return paintBrand(LOGO_CELL);
+		default: return " ".repeat(LOGO_CELL.length);
 	}
 }
 
@@ -166,51 +160,25 @@ function twoColumn(
 	return `${padRight(left, leftWidth)} ${paint("│")} ${padRight(right, rightWidth, "…")}`;
 }
 
-export class PiTuiHeader implements Component {
+export class OpenTuiHeader implements Component {
 	private readonly pi: ExtensionAPI;
 	private readonly ctx: ExtensionContext;
-	private readonly tui: TUI;
-	private frame = 0;
-	private readonly timer: ReturnType<typeof setInterval>;
+	private readonly frame = LOGO_FRAMES.length - 1;
 	private readonly tipCommands: string[];
 
-	constructor(pi: ExtensionAPI, ctx: ExtensionContext, tui: TUI) {
+	constructor(pi: ExtensionAPI, ctx: ExtensionContext, _tui: TUI) {
 		this.pi = pi;
 		this.ctx = ctx;
-		this.tui = tui;
 		const pool = collectPiCommandNames(pi.getCommands());
 		this.tipCommands = pickSlashCommandTips(pool, {
 			fixed: ["pi-tui"],
 			count: 3,
 		});
-		// Local change: play the logo animation once (120ms per frame, stops
-		// at the final frame) — the animated startup page from pi-claude-code-tui
-		// (upstream pi-tui header was static, pinned to the last frame).
-		//
-		// ponytail: resume 时会话已有历史消息 → 跳过动画直接定格最后一帧。
-		// 动画的 14 次强制 requestRender（约 1.7s）覆盖 transcript 从空到满的
-		// 启动窗口，会让 follow:"end" 的 ScrollView 反复钉底重排，表现为
-		// resume 后视口先跳会话头、再不受控滚到底部。只有新会话才播动画。
-		const isResume = ctx.sessionManager.getEntries().length > 0;
-		this.frame = isResume ? LOGO_FRAMES.length - 1 : 0;
-		if (isResume) {
-			this.timer = setInterval(() => {}, 0); // 占位：dispose() 的 clearInterval 保持安全
-		} else {
-			this.timer = setInterval(() => {
-				if (this.frame < LOGO_FRAMES.length - 1) {
-					this.frame++;
-					this.tui.requestRender();
-				} else {
-					clearInterval(this.timer);
-				}
-			}, LOGO_ANIMATION_INTERVAL_MS);
-		}
-		this.timer.unref?.();
 	}
 
 	render(width: number): string[] {
 		const theme = this.ctx.ui.theme;
-		const paint = (s: string) => theme.fg("thinkingHigh", s);
+		const paint = (s: string) => theme.fg("accent", s);
 		const muted = (s: string) => theme.fg("muted", s);
 		const dim = (s: string) => theme.fg("dim", s);
 		const bold = (s: string) => theme.bold(s);
@@ -258,16 +226,14 @@ export class PiTuiHeader implements Component {
 
 	invalidate(): void {}
 
-	dispose(): void {
-		clearInterval(this.timer);
-	}
+	dispose(): void {}
 }
 
 export function installHeader(pi: ExtensionAPI, ctx: ExtensionContext): () => void {
-	let header: PiTuiHeader | undefined;
+	let header: OpenTuiHeader | undefined;
 	ctx.ui.setHeader((tui) => {
 		header?.dispose();
-		header = new PiTuiHeader(pi, ctx, tui);
+		header = new OpenTuiHeader(pi, ctx, tui);
 		return header;
 	});
 	return () => {

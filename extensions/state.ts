@@ -1,5 +1,5 @@
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Usage } from "@earendil-works/pi-ai";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { GitStatus } from "./git.ts";
 import { emptyGitStatus } from "./git.ts";
 import type { RuntimeInfo } from "./runtime.ts";
@@ -94,8 +94,9 @@ export interface ModelMeta {
 export function getModelMeta(
 	ctx: ExtensionContext,
 	getThinkingLevel: () => string,
+	capitalizeProviderName: boolean,
 ): ModelMeta {
-	const provider = formatProviderLabel(ctx.model?.provider);
+	const provider = formatProviderLabel(ctx.model?.provider, capitalizeProviderName);
 	const model = ctx.model?.name ?? ctx.model?.id ?? "no-model";
 	const reasoning = ctx.model?.reasoning ?? false;
 	const effort = reasoning ? getThinkingLevel() : undefined;

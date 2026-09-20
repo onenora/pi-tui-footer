@@ -9,11 +9,13 @@ import type { IconMode } from "./icons.ts";
 
 export type SettingsLanguage = "en" | "zh";
 export type CursorStyle = "block" | "bar" | "underline";
+export type ThinkingPeekLines = 0 | 1 | 2;
 
 export type { IconMode } from "./icons.ts";
 
 export interface FooterSegments {
 	cwd: boolean;
+	hostname: boolean;
 	sessionName: boolean;
 	gitBranch: boolean;
 	gitStatus: boolean;
@@ -23,6 +25,7 @@ export interface FooterSegments {
 	tokens: boolean;
 	cost: boolean;
 	extensionStatuses: boolean;
+	capitalizeProviderName: boolean;
 }
 
 export interface TelemetryConfig {
@@ -35,11 +38,15 @@ export interface TelemetryConfig {
 	cost: boolean;
 }
 
+export interface ThinkingPeekConfig {
+	lines: ThinkingPeekLines;
+}
+
 export interface FullscreenConfig {
 	wheelScrollLines: number;
 }
 
-export interface PiTuiConfig {
+export interface OpenTuiConfig {
 	enabled: boolean;
 	roundedTools: boolean;
 	settingsLanguage: SettingsLanguage;
@@ -50,9 +57,12 @@ export interface PiTuiConfig {
 	};
 	footerSegments: FooterSegments;
 	telemetry: TelemetryConfig;
+	thinkingPeek: ThinkingPeekConfig;
 }
 
-export const DEFAULT_CONFIG: PiTuiConfig = {
+export type PiTuiConfig = OpenTuiConfig;
+
+export const DEFAULT_CONFIG: OpenTuiConfig = {
 	enabled: true,
 	roundedTools: true,
 	settingsLanguage: "en",
@@ -65,6 +75,7 @@ export const DEFAULT_CONFIG: PiTuiConfig = {
 	},
 	footerSegments: {
 		cwd: true,
+		hostname: false,
 		sessionName: false,
 		gitBranch: true,
 		gitStatus: true,
@@ -74,6 +85,7 @@ export const DEFAULT_CONFIG: PiTuiConfig = {
 		tokens: true,
 		cost: true,
 		extensionStatuses: true,
+		capitalizeProviderName: true,
 	},
 	telemetry: {
 		enabled: true,
@@ -84,11 +96,22 @@ export const DEFAULT_CONFIG: PiTuiConfig = {
 		stalls: true,
 		cost: true,
 	},
+	thinkingPeek: {
+		lines: 1,
+	},
 };
 
 export function getConfigPath(): string {
 	const agentDir = getAgentDir();
-	return join(agentDir, "pi-tui.json");
+	const piTuiPath = join(agentDir, "pi-tui.json");
+	const openTuiPath = join(agentDir, "open-tui.json");
+	if (existsSync(piTuiPath)) return piTuiPath;
+	if (existsSync(openTuiPath)) return openTuiPath;
+	return piTuiPath;
+}
+
+function normalizeThinkingPeekLines(value: unknown): ThinkingPeekLines {
+	return value === 0 || value === 1 || value === 2 ? value : DEFAULT_CONFIG.thinkingPeek.lines;
 }
 
 function deepMerge<T>(base: T, override: unknown): T {
@@ -125,7 +148,7 @@ export function ensureConfigExists(): void {
 	}
 }
 
-export function loadConfig(notify?: (msg: string, level: "warning" | "info") => void): PiTuiConfig {
+export function loadConfig(notify?: (msg: string, level: "warning" | "info") => void): OpenTuiConfig {
 	const path = getConfigPath();
 	if (!existsSync(path)) {
 		ensureConfigExists();
@@ -146,6 +169,14 @@ export function loadConfig(notify?: (msg: string, level: "warning" | "info") => 
 			config.fullscreen.wheelScrollLines,
 			DEFAULT_CONFIG.fullscreen.wheelScrollLines,
 		);
+		if (typeof config.thinkingPeek !== "object" || config.thinkingPeek === null || Array.isArray(config.thinkingPeek)) {
+			config.thinkingPeek = structuredClone(DEFAULT_CONFIG.thinkingPeek);
+		} else {
+			config.thinkingPeek.lines = normalizeThinkingPeekLines(config.thinkingPeek.lines);
+		}
+		if (typeof config.roundedTools !== "boolean") {
+			config.roundedTools = DEFAULT_CONFIG.roundedTools;
+		}
 		return config;
 	} catch (err) {
 		notify?.(`pi-tui config parse error: ${err instanceof Error ? err.message : String(err)}`, "warning");
@@ -153,7 +184,7 @@ export function loadConfig(notify?: (msg: string, level: "warning" | "info") => 
 	}
 }
 
-export function saveConfig(config: PiTuiConfig): void {
+export function saveConfig(config: OpenTuiConfig): void {
 	const path = getConfigPath();
 	try {
 		const agentDir = getAgentDir();

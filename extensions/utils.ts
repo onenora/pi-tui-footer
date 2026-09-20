@@ -66,19 +66,19 @@ export function finiteOrZero(value: unknown): number {
 	return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
-export function formatInputBreakdown(uncached: number, cacheRead: number): string {
-	const total = fmtTokens(uncached + cacheRead);
-	return cacheRead > 0
-		? `${total} (U ${fmtTokens(uncached)} + R ${fmtTokens(cacheRead)})`
-		: total;
-}
-
 export function fmtTokens(n: number): string {
 	if (n < 1000) return n.toString();
 	if (n < 10_000) return `${(n / 1000).toFixed(1)}k`;
 	if (n < 1_000_000) return `${Math.round(n / 1000)}k`;
 	if (n < 10_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
 	return `${Math.round(n / 1_000_000)}M`;
+}
+
+export function formatInputBreakdown(uncached: number, cacheRead: number): string {
+	const total = fmtTokens(uncached + cacheRead);
+	return cacheRead > 0
+		? `${total} (U ${fmtTokens(uncached)} + R ${fmtTokens(cacheRead)})`
+		: total;
 }
 
 export function formatDuration(ms: number): string {
@@ -97,9 +97,9 @@ export function formatModelLabel(model: { provider?: string; id?: string } | nul
 	return model.provider ? `${model.provider}/${model.id}` : model.id;
 }
 
-export function formatProviderLabel(provider: string | undefined): string {
+export function formatProviderLabel(provider: string | undefined, capitalize: boolean): string {
 	if (!provider) return "Unknown";
-	return provider.charAt(0).toUpperCase() + provider.slice(1);
+	return capitalize ? provider.charAt(0).toUpperCase() + provider.slice(1) : provider;
 }
 
 export function alignRight(left: string, right: string, width: number, theme: Theme): string {

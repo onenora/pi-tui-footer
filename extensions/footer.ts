@@ -1,6 +1,7 @@
 import type { ExtensionContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
+import { hostname as osHostname } from "node:os";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import type { PiTuiConfig } from "./config.ts";
+import type { OpenTuiConfig } from "./config.ts";
 import type { IconGlyphs } from "./icons.ts";
 import { resolveGlyphs, resolveIconMode, runtimeSymbol } from "./icons.ts";
 import type { GitStatus } from "./git.ts";
@@ -25,14 +26,16 @@ import {
 import type { FooterState, ModelMeta, UsageTotals } from "./state.ts";
 import { getUsageTotals } from "./state.ts";
 
+export function shortHostname(hostname: string): string {
+	return hostname.split(".")[0] ?? "";
+}
+
 function renderBar(theme: Theme, pct: number, barWidth: number, ascii: boolean): string {
 	const filled = Math.max(0, Math.min(barWidth, Math.round((pct / 100) * barWidth)));
 	const empty = barWidth - filled;
 	const color = stressColor(pct);
-	// Use half-height parallelogram blocks (▰/▱) instead of full-height
-	// █/░ so the bar's visual height matches the surrounding [ ] brackets.
-	const filledCell = ascii ? "#" : "▰";
-	const emptyCell = ascii ? "-" : "▱";
+	const filledCell = ascii ? "#" : "█";
+	const emptyCell = ascii ? "-" : "░";
 	return (
 		theme.fg("dim", "[") +
 		theme.fg(color, filledCell.repeat(filled)) +
@@ -54,7 +57,7 @@ function renderGitSegment(
 	theme: Theme,
 	git: GitStatus,
 	glyphs: IconGlyphs,
-	segments: PiTuiConfig["footerSegments"],
+	segments: OpenTuiConfig["footerSegments"],
 	maxBranchLen = 20,
 ): string {
 	const parts: string[] = [];
@@ -107,7 +110,7 @@ function renderGitSegment(
 function renderRuntimeSegment(
 	theme: Theme,
 	runtime: RuntimeInfo | null,
-	iconMode: PiTuiConfig["icons"]["mode"],
+	iconMode: OpenTuiConfig["icons"]["mode"],
 ): string {
 	if (!runtime) return "";
 	const symbol = theme.fg("success", runtimeSymbol(runtime.name, iconMode));
@@ -131,7 +134,7 @@ function renderContextBar(
 	ctx: ExtensionContext,
 	width: number,
 	glyphs: IconGlyphs,
-	iconMode: PiTuiConfig["icons"]["mode"],
+	iconMode: OpenTuiConfig["icons"]["mode"],
 ): string {
 	const contextUsage = ctx.getContextUsage();
 	const contextWindow = contextUsage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
@@ -156,7 +159,7 @@ function renderStatsBlock(
 	theme: Theme,
 	totals: UsageTotals,
 	glyphs: IconGlyphs,
-	segments: PiTuiConfig["footerSegments"],
+	segments: OpenTuiConfig["footerSegments"],
 ): string {
 	const stats: string[] = [];
 	if (segments.tokens) {
@@ -202,7 +205,7 @@ export interface FooterHooks {
 export function installFooter(
 	ctx: ExtensionContext,
 	getState: () => FooterState,
-	getConfig: () => PiTuiConfig,
+	getConfig: () => OpenTuiConfig,
 	getModelMeta: () => ModelMeta,
 	hooks: FooterHooks,
 ): () => void {
@@ -247,6 +250,15 @@ export function installFooter(
 							return `${cwdPrefix}${accent(truncatePath(basenamePath(cwd), pathWidth))}`;
 						},
 					});
+				}
+				if (segments.hostname) {
+					const shortHost = shortHostname(osHostname());
+					if (shortHost) {
+						leftParts.push({
+							text: `${theme.fg("dim", glyphs.host)} ${theme.fg("accent", shortHost)}`,
+							priority: 1,
+						});
+					}
 				}
 				if (segments.sessionName) {
 					const sessionName = ctx.sessionManager.getSessionName();
