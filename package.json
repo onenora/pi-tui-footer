@@ -9,6 +9,11 @@
 		"tui"
 	],
 	"license": "MIT",
+	"files": [
+		"extensions",
+		"README.md",
+		"LICENSE"
+	],
 	"repository": {
 		"type": "git",
 		"url": "git+https://github.com/onenora/pi-tui-footer.git"

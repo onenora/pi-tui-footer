@@ -5,6 +5,12 @@ pi 插件：TUI 美化套件 — 动画 Pi logo 头部、Starship 风格底部�
 ## 安装
 
 ```bash
+pi install npm:pi-tui-footer
+```
+
+或通过 Git：
+
+```bash
 pi install git:github.com/onenora/pi-tui-footer
 ```
 
