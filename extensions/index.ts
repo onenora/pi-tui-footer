@@ -4,7 +4,7 @@
  * thinking peek preview, rounded tool frames, and turn telemetry.
  *
  * Integrated from:
- *   - pi-open-tui (v0.3.7, MIT, by OldSun, https://github.com/OldSuns/pi-open-tui)
+ *   - pi-open-tui (v0.3.8, MIT, by OldSun, https://github.com/OldSuns/pi-open-tui)
  *   - pi-rounded-tools (v0.1.3, MIT, by OrionPax, https://github.com/orionpax1997/pi-rounded-tools)
  *
  * Security audit notes:
@@ -17,7 +17,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type OpenTuiConfig, DEFAULT_CONFIG, ensureConfigExists, loadConfig, saveConfig } from "./config.ts";
 import { installEditor } from "./editor.ts";
-import { installFooter } from "./footer.ts";
+import { installFooter, type FooterHandle } from "./footer.ts";
 import { installHeader } from "./header.ts";
 import { emptyGitStatus, readGitStatus } from "./git.ts";
 import { readRuntimeInfo } from "./runtime.ts";
@@ -71,7 +71,7 @@ export default function (pi: ExtensionAPI) {
 	let requestFooterRender: (() => void) | undefined;
 	let workingTimer: ReturnType<typeof setInterval> | undefined;
 	let cleanupHeader: (() => void) | undefined;
-	let cleanupFooter: (() => void) | undefined;
+	let cleanupFooter: FooterHandle | undefined;
 	let editor: ReturnType<typeof installEditor> | undefined;
 	let pendingUiChange: PendingUiChange | undefined;
 
@@ -150,7 +150,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		if (!active) {
 			cleanupHeader = installHeader(pi, ctx);
-			cleanupFooter = installFooter(
+			const footer = installFooter(
 				ctx,
 				() => state,
 				() => config,
@@ -164,7 +164,17 @@ export default function (pi: ExtensionAPI) {
 					},
 				},
 			);
-			editor = installEditor(pi, ctx, config.cursorStyle, config.fullscreen.wheelScrollLines);
+			cleanupFooter = footer;
+			editor = installEditor(
+				pi,
+				ctx,
+				config.cursorStyle,
+				config.fullscreen.wheelScrollLines,
+				{
+					enabled: () => config.inlineFooter,
+					render: footer.renderInline,
+				},
+			);
 			active = true;
 		}
 	};
@@ -173,7 +183,7 @@ export default function (pi: ExtensionAPI) {
 		if (!isTuiContext(ctx)) return;
 		if (active) {
 			cleanupHeader?.();
-			cleanupFooter?.();
+			cleanupFooter?.cleanup();
 			editor?.cleanup();
 			cleanupHeader = undefined;
 			cleanupFooter = undefined;

@@ -171,7 +171,7 @@ export class OpenTuiHeader implements Component {
 		this.ctx = ctx;
 		const pool = collectPiCommandNames(pi.getCommands());
 		this.tipCommands = pickSlashCommandTips(pool, {
-			fixed: ["pi-tui"],
+			fixed: ["open-tui"],
 			count: 3,
 		});
 	}

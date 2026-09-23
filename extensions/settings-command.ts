@@ -34,6 +34,7 @@ const COPY = {
 		labels: {
 			enabled: "Enabled",
 			roundedTools: "Rounded tool frames",
+			inlineFooter: "Inline footer",
 			thinkingPeek: "Thinking peek",
 			language: "Language",
 			wheelScrollLines: "Mouse wheel speed",
@@ -74,6 +75,7 @@ const COPY = {
 		labels: {
 			enabled: "启用",
 			roundedTools: "圆角工具边框",
+			inlineFooter: "内联底栏",
 			thinkingPeek: "思考预览",
 			language: "语言",
 			wheelScrollLines: "鼠标滚轮速度",
@@ -181,6 +183,7 @@ function buildFeaturesItems(config: OpenTuiConfig, copy: SettingsCopy): SettingI
 	return [
 		{ id: "enabled", label: copy.labels.enabled, currentValue: flag(config.enabled) },
 		{ id: "roundedTools", label: copy.labels.roundedTools, currentValue: flag(config.roundedTools) },
+		{ id: "inlineFooter", label: copy.labels.inlineFooter, currentValue: flag(config.inlineFooter) },
 		{ id: "settingsLanguage", label: copy.labels.language, currentValue: copy.values.languages[config.settingsLanguage] },
 		{
 			id: "wheelScrollLines",
@@ -249,6 +252,7 @@ function handleSettingChange(
 	if (tab === "features") {
 		if (itemId === "enabled") return toggleEnabled(config);
 		if (itemId === "roundedTools") return { ...config, roundedTools: !config.roundedTools };
+		if (itemId === "inlineFooter") return { ...config, inlineFooter: !config.inlineFooter };
 		if (itemId === "settingsLanguage") return toggleLanguage(config);
 		if (itemId === "thinkingPeek") return cycleThinkingPeek(config);
 	}

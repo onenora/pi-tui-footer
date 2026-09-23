@@ -49,6 +49,7 @@ export interface FullscreenConfig {
 export interface OpenTuiConfig {
 	enabled: boolean;
 	roundedTools: boolean;
+	inlineFooter: boolean;
 	settingsLanguage: SettingsLanguage;
 	cursorStyle: CursorStyle;
 	fullscreen: FullscreenConfig;
@@ -65,6 +66,7 @@ export type PiTuiConfig = OpenTuiConfig;
 export const DEFAULT_CONFIG: OpenTuiConfig = {
 	enabled: true,
 	roundedTools: true,
+	inlineFooter: false,
 	settingsLanguage: "en",
 	cursorStyle: "block",
 	fullscreen: {
@@ -173,6 +175,9 @@ export function loadConfig(notify?: (msg: string, level: "warning" | "info") => 
 			config.thinkingPeek = structuredClone(DEFAULT_CONFIG.thinkingPeek);
 		} else {
 			config.thinkingPeek.lines = normalizeThinkingPeekLines(config.thinkingPeek.lines);
+		}
+		if (typeof config.inlineFooter !== "boolean") {
+			config.inlineFooter = DEFAULT_CONFIG.inlineFooter;
 		}
 		if (typeof config.roundedTools !== "boolean") {
 			config.roundedTools = DEFAULT_CONFIG.roundedTools;
