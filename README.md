@@ -17,7 +17,7 @@ pi install git:github.com/onenora/pi-tui-footer
 固定版本：
 
 ```bash
-pi install git:github.com/onenora/pi-tui-footer@v1.2.0
+pi install git:github.com/onenora/pi-tui-footer@v1.2.2
 ```
 
 更新：
