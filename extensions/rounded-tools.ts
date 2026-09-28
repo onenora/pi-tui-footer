@@ -8,7 +8,7 @@
  * OldSun) and gated behind `roundedTools` in pi-tui config
  * (~/.pi/agent/pi-tui.json, default on).
  *
- * Re-registers the built-in tools (read, write, edit, grep, find, ls)
+ * Re-registers the built-in tools (read, write, edit, bash, grep, find, ls)
  * with `renderShell: "self"` and wraps each tool call / result in a frame
  * drawn with Unicode rounded-corner characters (╭ ╮ ╰ ╯ ─ │).
  *
@@ -26,6 +26,7 @@
 
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import {
+	createBashToolDefinition,
 	createEditToolDefinition,
 	createFindToolDefinition,
 	createGrepToolDefinition,
@@ -228,7 +229,7 @@ function wrapBuiltin(def: ToolDef) {
 }
 
 /**
- * Register the 6 built-in file tools, either with rounded frames
+ * Register the 7 built-in file/bash tools, either with rounded frames
  * (`enabled`) or with their plain stock definitions (`!enabled`, restores
  * original rendering). Registration refreshes the active tool set in the
  * current session, so toggling the setting takes effect immediately.
@@ -238,6 +239,7 @@ export function registerRoundedTools(pi: ExtensionAPI, enabled: boolean, cwd: st
 		createReadToolDefinition(cwd),
 		createWriteToolDefinition(cwd),
 		createEditToolDefinition(cwd),
+		createBashToolDefinition(cwd),
 		createGrepToolDefinition(cwd),
 		createFindToolDefinition(cwd),
 		createLsToolDefinition(cwd),
