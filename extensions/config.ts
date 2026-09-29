@@ -61,8 +61,6 @@ export interface OpenTuiConfig {
 	thinkingPeek: ThinkingPeekConfig;
 }
 
-export type PiTuiConfig = OpenTuiConfig;
-
 export const DEFAULT_CONFIG: OpenTuiConfig = {
 	enabled: true,
 	roundedTools: true,
@@ -105,11 +103,7 @@ export const DEFAULT_CONFIG: OpenTuiConfig = {
 
 export function getConfigPath(): string {
 	const agentDir = getAgentDir();
-	const piTuiPath = join(agentDir, "pi-tui.json");
-	const openTuiPath = join(agentDir, "open-tui.json");
-	if (existsSync(piTuiPath)) return piTuiPath;
-	if (existsSync(openTuiPath)) return openTuiPath;
-	return piTuiPath;
+	return join(agentDir, "pi-tui.json");
 }
 
 function normalizeThinkingPeekLines(value: unknown): ThinkingPeekLines {

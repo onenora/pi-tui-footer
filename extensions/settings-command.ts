@@ -65,7 +65,7 @@ const COPY = {
 			wheelLines: (count: number) => `${count} ${count === 1 ? "line" : "lines"} / notch`,
 			wheelPrompt: (count: number) => `Wheel scroll lines per notch, 1-10 (current: ${count}). Enter: apply · Esc: cancel`,
 			cursorStyles: { block: "Block", bar: "Bar", underline: "Underline" },
-			icons: { auto: "Auto", nerd: "Nerd", ascii: "ASCII" },
+			icons: { auto: "Auto", nerd: "Nerd", unicode: "Unicode", ascii: "ASCII" },
 		},
 	},
 	zh: {
@@ -106,7 +106,7 @@ const COPY = {
 			wheelLines: (count: number) => `每格 ${count} 行`,
 			wheelPrompt: (count: number) => `滚轮每格滚动行数（当前 ${count}，范围 1-10），输入后 Enter 应用 · Esc 取消`,
 			cursorStyles: { block: "块", bar: "竖线", underline: "下划线" },
-			icons: { auto: "自动", nerd: "Nerd", ascii: "ASCII" },
+			icons: { auto: "自动", nerd: "Nerd", unicode: "Unicode", ascii: "ASCII" },
 		},
 	},
 } as const;
@@ -129,7 +129,7 @@ function toggleSetting(config: OpenTuiConfig, key: keyof OpenTuiConfig["footerSe
 }
 
 function cycleIconMode(config: OpenTuiConfig): OpenTuiConfig {
-	const order: IconMode[] = ["auto", "nerd", "ascii"];
+	const order: IconMode[] = ["auto", "nerd", "unicode", "ascii"];
 	const currentIdx = order.indexOf(config.icons.mode);
 	const next = order[(currentIdx + 1) % order.length]!;
 	return { ...config, icons: { mode: next } };
@@ -183,7 +183,6 @@ function buildFeaturesItems(config: OpenTuiConfig, copy: SettingsCopy): SettingI
 	return [
 		{ id: "enabled", label: copy.labels.enabled, currentValue: flag(config.enabled) },
 		{ id: "roundedTools", label: copy.labels.roundedTools, currentValue: flag(config.roundedTools) },
-		{ id: "inlineFooter", label: copy.labels.inlineFooter, currentValue: flag(config.inlineFooter) },
 		{ id: "settingsLanguage", label: copy.labels.language, currentValue: copy.values.languages[config.settingsLanguage] },
 		{
 			id: "wheelScrollLines",
@@ -191,6 +190,7 @@ function buildFeaturesItems(config: OpenTuiConfig, copy: SettingsCopy): SettingI
 			currentValue: copy.values.wheelLines(config.fullscreen.wheelScrollLines),
 		},
 		{ id: "thinkingPeek", label: copy.labels.thinkingPeek, currentValue: formatThinkingPeekLines(config.thinkingPeek.lines, copy) },
+		{ id: "inlineFooter", label: copy.labels.inlineFooter, currentValue: flag(config.inlineFooter) },
 	];
 }
 
@@ -484,7 +484,7 @@ export function registerSettingsCommand(
 		onOverlayClosed?: () => void;
 	},
 ): void {
-	const commandDef = {
+	pi.registerCommand("pi-tui", {
 		description: "Open the Pi TUI settings UI",
 		handler: async (_args: string, ctx: ExtensionContext) => {
 			if (!ctx.hasUI) return;
@@ -509,7 +509,5 @@ export function registerSettingsCommand(
 			// cannot strand the overlay without keyboard input.
 			hooks.onOverlayClosed?.();
 		},
-	};
-	pi.registerCommand("pi-tui", commandDef);
-	pi.registerCommand("open-tui", commandDef);
+	});
 }
