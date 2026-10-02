@@ -31,10 +31,11 @@ import {
 	createFindToolDefinition,
 	createGrepToolDefinition,
 	createLsToolDefinition,
+	createPowerShellToolDefinition,
 	createReadToolDefinition,
 	createWriteToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import type { Component } from "@earendil-works/pi-tui";
+import type { Component, TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
 // ─── Rounded-corner frame ────────────────────────────────────────────────
@@ -53,11 +54,41 @@ class RoundedFrame implements Component {
 		private readonly mode: FrameMode = "closed",
 	) {}
 
+	getInner(): Component {
+		return this.inner;
+	}
+
 	invalidate(): void {
 		this.inner.invalidate?.();
 		this.cachedWidth = undefined;
 		this.cachedInnerLines = undefined;
 		this.cachedLines = undefined;
+	}
+
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		if (!this.inner.handleMouse) return undefined;
+
+		const width = this.cachedWidth ?? event.width;
+		if (width < 4) {
+			return this.inner.handleMouse(event);
+		}
+
+		const innerWidth = Math.max(1, width - 4);
+		const paddingTop = this.mode !== "open-top" ? 1 : 0;
+		const contentX = event.x - 2;
+		const contentY = event.y - paddingTop;
+		const innerHeight = this.cachedInnerLines?.length ?? 0;
+
+		if (contentX < 0 || contentX >= innerWidth || contentY < 0 || contentY >= innerHeight) {
+			return undefined;
+		}
+
+		return this.inner.handleMouse({
+			...event,
+			x: contentX,
+			y: contentY,
+			width: innerWidth,
+		});
 	}
 
 	// pi's built-in tool renderers cache the previously-returned component
@@ -177,8 +208,8 @@ const frame = (
 function borderColorFor(
 	context: { isPartial?: boolean; isError?: boolean } | undefined,
 ): string {
-	if (context?.isPartial) return "warning";
 	if (context?.isError) return "error";
+	if (context?.isPartial) return "warning";
 	return "border";
 }
 
@@ -189,93 +220,91 @@ type ToolDef = ToolDefinition<any, any, any>;
 const EMPTY_COMPONENT: Component = { render: () => [], invalidate: () => {} };
 
 /**
- * Wrap a built-in tool definition in rounded frames.
+ * Unwrap inner component from a RoundedFrame if context.lastComponent is wrapped,
+ * allowing underlying renderers (e.g. edit, bash, read) to preserve their component
+ * cache across renders instead of recreating on every tick.
+ */
+function unwrapInner(component: unknown): Component | undefined {
+	if (component instanceof RoundedFrame) {
+		return component.getInner();
+	}
+	return component as Component | undefined;
+}
+
+/**
+ * Wrap a tool definition in rounded frames.
  *
- * We spread the original definition first so we preserve every metadata
- * field (promptSnippet / promptGuidelines / prepareArguments /
- * constrainedSampling / executionMode / …) — only the renderers and
- * `renderShell` are overwritten. This keeps the tool's LLM-facing prompt
- * data intact, edit's argument pre-processing intact, etc.
+ * Preserves all metadata (promptSnippet, promptGuidelines, parameters, etc.)
+ * while wrapping renderCall and renderResult with rounded borders.
+ * Uses closed mode for tools without renderResult to avoid open bottom borders.
  */
 function wrapBuiltin(def: ToolDef) {
+	const callMode: FrameMode = def.renderResult ? "open-bottom" : "closed";
 	return {
 		...def,
 		renderShell: "self" as const,
 		renderCall: (args: any, theme: any, context: any) => {
-			// Hide our (or any) previous wrapper from the inner renderer so it
-			// doesn't treat a RoundedFrame as its own lastComponent — that
-			// would either throw (`Text.setText` is missing) or nest frames
-			// (`inner = previous RoundedFrame` → we re-wrap it). Forcing the
-			// inner to allocate fresh costs one Text/Container per render but
-			// keeps every render independent and CC-protect against future
-			// tool changes.
+			const unwrapped = unwrapInner(context?.lastComponent);
 			const inner: Component = def.renderCall
-				? def.renderCall(args, theme, { ...context, lastComponent: undefined })
+				? def.renderCall(args, theme, { ...context, lastComponent: unwrapped })
 				: EMPTY_COMPONENT;
-			// During execution pi re-renders every tick (e.g. bash's elapsed
-			// timer). Skip the frame then — keeping its borders stable avoids
-			// redraw flicker — and only wrap it once the tool settles.
-			if (context?.isPartial) return inner;
-			return frame(inner, theme, "open-bottom", borderColorFor(context));
+			return frame(inner, theme, callMode, borderColorFor(context));
 		},
 		renderResult: (result: any, options: any, theme: any, context: any) => {
+			const unwrapped = unwrapInner(context?.lastComponent);
 			const inner: Component = def.renderResult
-				? def.renderResult(result, options, theme, { ...context, lastComponent: undefined })
+				? def.renderResult(result, options, theme, { ...context, lastComponent: unwrapped })
 				: EMPTY_COMPONENT;
-			if (context?.isPartial) return inner;
 			return frame(inner, theme, "open-top", borderColorFor(context));
 		},
 	};
 }
 
-// Tool names registered by third-party extensions (e.g. pi-fff) that should
-// also receive rounded frames. We match by name so the proxy knows which
-// registrations to wrap. Built-in tools are handled separately via their
-// factory functions.
-const THIRD_PARTY_ROUNDED_NAMES = new Set([
-	"ffgrep",
-	"fffind",
-	"fff-multi-grep",
-]);
-
 /**
- * Register the 7 built-in file/bash tools, either with rounded frames
- * (`enabled`) or with their plain stock definitions (`!enabled`, restores
- * original rendering). Registration refreshes the active tool set in the
- * current session, so toggling the setting takes effect immediately.
+ * Register built-in tools (read, write, edit, bash, powershell, grep, find, ls),
+ * either with rounded frames (`enabled`) or with stock definitions (`!enabled`).
+ *
+ * If a third-party extension has already replaced a built-in tool (e.g. pi-fff
+ * overriding grep/find), that tool is skipped here to prevent clobbering.
  */
-export function registerRoundedTools(pi: ExtensionAPI, enabled: boolean, cwd: string): void {
-	const tools: ToolDef[] = [
-		createReadToolDefinition(cwd),
-		createWriteToolDefinition(cwd),
-		createEditToolDefinition(cwd),
-		createBashToolDefinition(cwd),
-		createGrepToolDefinition(cwd),
-		createFindToolDefinition(cwd),
-		createLsToolDefinition(cwd),
-	];
+export function registerRoundedTools(
+	target: ExtensionAPI | ((tool: ToolDef) => void),
+	enabled: boolean,
+	cwd: string,
+	captured?: Map<string, ToolDef>,
+): void {
+	const register = typeof target === "function" ? target : target.registerTool.bind(target);
 
-	for (const def of tools) {
-		pi.registerTool(enabled ? wrapBuiltin(def) : def);
+	const builtins: Record<string, () => ToolDef> = {
+		read: () => createReadToolDefinition(cwd),
+		write: () => createWriteToolDefinition(cwd),
+		edit: () => createEditToolDefinition(cwd),
+		bash: () => createBashToolDefinition(cwd),
+		powershell: () => createPowerShellToolDefinition(cwd),
+		ls: () => createLsToolDefinition(cwd),
+		grep: () => createGrepToolDefinition(cwd),
+		find: () => createFindToolDefinition(cwd),
+	};
+
+	for (const [name, factory] of Object.entries(builtins)) {
+		if (!captured?.has(name)) {
+			register(enabled ? wrapBuiltin(factory()) : factory());
+		}
 	}
 }
 
 /**
  * Manager class encapsulating rounded tools registration and lifecycle updates.
  *
- * In addition to wrapping the 7 built-in tools, it installs a
- * `pi.registerTool` proxy so that third-party tools (e.g. pi-fff's ffgrep,
- * fffind, fff-multi-grep) are automatically wrapped with rounded frames
- * when `roundedTools` is enabled.
+ * In addition to wrapping built-in tools, it installs a `pi.registerTool` proxy
+ * so that any tool registered by third-party extensions (e.g. pi-fff's ffgrep,
+ * fffind, fff-multi-grep, or overridden grep/find) automatically receives rounded
+ * frames when `roundedTools` is enabled, without maintaining a fragile hardcoded
+ * name whitelist.
  *
- * **Load-order requirement**: pi-tui-footer must load **before** pi-fff so
- * that the proxy is in place when pi-fff calls `pi.registerTool()`. In
- * `~/.pi/agent/settings.json`, place `"npm:pi-tui-footer"` before
- * `"npm:@ff-labs/pi-fff"` in the `packages` array.
- *
- * The proxy captures each incoming third-party definition and wraps it
- * on the fly. `init()` and `apply()` re-register captured definitions
- * when `enabled` is toggled or the session cwd changes.
+ * Load-order note: For extensions that register tools at load time, place
+ * `pi-tui-footer` before those packages in `~/.pi/agent/settings.json` so the
+ * proxy is active when they load.
  */
 export class RoundedToolsManager {
 	private enabled = false;
@@ -286,8 +315,6 @@ export class RoundedToolsManager {
 	private readonly captured = new Map<string, ToolDef>();
 
 	constructor(private readonly pi: ExtensionAPI) {
-		// Install the proxy as early as possible so that third-party
-		// extensions loaded after us (but before init()) are captured.
 		this.installProxy();
 	}
 
@@ -295,7 +322,7 @@ export class RoundedToolsManager {
 	init(enabled: boolean, cwd = process.cwd()): void {
 		this.enabled = enabled;
 		this.installProxy();
-		registerRoundedTools(this.pi, enabled, cwd);
+		registerRoundedTools(this.originalRegisterTool, enabled, cwd, this.captured);
 		this.reRegisterCaptured();
 	}
 
@@ -303,14 +330,13 @@ export class RoundedToolsManager {
 	apply(enabled: boolean, cwd: string): void {
 		this.enabled = enabled;
 		this.installProxy();
-		registerRoundedTools(this.pi, enabled, cwd);
+		registerRoundedTools(this.originalRegisterTool, enabled, cwd, this.captured);
 		this.reRegisterCaptured();
 	}
 
 	/**
 	 * Install a one-time proxy on `pi.registerTool` to intercept third-party
-	 * tool registrations. The proxy captures the original definition and
-	 * conditionally wraps it.
+	 * tool registrations.
 	 */
 	private installProxy(): void {
 		if (this.proxyInstalled) return;
@@ -321,25 +347,21 @@ export class RoundedToolsManager {
 		const self = this;
 
 		this.pi.registerTool = function proxyRegisterTool(tool: ToolDef) {
-			if (THIRD_PARTY_ROUNDED_NAMES.has(tool.name)) {
-				// Capture the original (unwrapped) definition.
-				// pi-fff may re-register its tools (e.g. mode change), so
-				// only capture if it's not already a wrapped version (no
-				// renderShell: "self" means it's the original).
-				if (tool.renderShell !== "self") {
-					self.captured.set(tool.name, tool);
-				}
-				original(self.enabled ? wrapBuiltin(tool) : tool);
+			// Don't intercept tools that already render their own shell
+			if (tool.renderShell === "self") {
+				original(tool);
 				return;
 			}
-			original(tool);
+
+			// Capture the unwrapped original definition
+			self.captured.set(tool.name, tool);
+			original(self.enabled ? wrapBuiltin(tool) : tool);
 		};
 	}
 
 	/**
 	 * Re-register all captured third-party tools with or without rounded
-	 * frames based on the current `enabled` state. Handles the case where
-	 * third-party extensions loaded before us.
+	 * frames based on the current `enabled` state.
 	 */
 	private reRegisterCaptured(): void {
 		for (const def of this.captured.values()) {
