@@ -21,7 +21,6 @@ const EXT_DIR = join(ROOT_DIR, "extensions");
 // Files that are 100% upstream-identical and safe to copy directly from open-tui
 const PURE_UPSTREAM_FILES = [
 	"editor.ts",
-	"fullscreen-scroll.ts",
 	"git.ts",
 	"header.ts",
 	"icons.ts",

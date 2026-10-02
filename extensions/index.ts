@@ -4,7 +4,7 @@
  * thinking peek preview, rounded tool frames, and turn telemetry.
  *
  * Integrated from:
- *   - pi-open-tui (v0.3.10, MIT, by OldSun, https://github.com/OldSuns/pi-open-tui)
+ *   - pi-open-tui (v0.3.11, MIT, by OldSun, https://github.com/OldSuns/pi-open-tui)
  *   - pi-rounded-tools (v0.1.3, MIT, by OrionPax, https://github.com/orionpax1997/pi-rounded-tools)
  *
  * Security audit notes:
@@ -169,7 +169,6 @@ export default function (pi: ExtensionAPI) {
 				pi,
 				ctx,
 				config.cursorStyle,
-				config.fullscreen.wheelScrollLines,
 				{
 					enabled: () => config.inlineFooter,
 					render: footer.renderInline,
@@ -423,7 +422,6 @@ export default function (pi: ExtensionAPI) {
 			const wasEnabled = config.enabled;
 			const wasRoundedTools = config.roundedTools;
 			const cursorStyleChanged = config.cursorStyle !== newConfig.cursorStyle;
-			const wheelScrollLinesChanged = config.fullscreen.wheelScrollLines !== newConfig.fullscreen.wheelScrollLines;
 			const thinkingPeekLinesChanged = config.thinkingPeek.lines !== newConfig.thinkingPeek.lines;
 			saveConfig(newConfig);
 			config = newConfig;
@@ -435,9 +433,6 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (cursorStyleChanged && active && editor) {
 				editor.setCursorStyle(newConfig.cursorStyle);
-			}
-			if (wheelScrollLinesChanged && active && editor) {
-				editor.setWheelScrollLines(newConfig.fullscreen.wheelScrollLines);
 			}
 			if (lastCtx) {
 				pendingUiChange = getPendingUiChange(newConfig.enabled, active);
