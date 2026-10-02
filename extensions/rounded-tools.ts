@@ -228,6 +228,16 @@ function wrapBuiltin(def: ToolDef) {
 	};
 }
 
+// Tool names registered by third-party extensions (e.g. pi-fff) that should
+// also receive rounded frames. We match by name so the proxy knows which
+// registrations to wrap. Built-in tools are handled separately via their
+// factory functions.
+const THIRD_PARTY_ROUNDED_NAMES = new Set([
+	"ffgrep",
+	"fffind",
+	"fff-multi-grep",
+]);
+
 /**
  * Register the 7 built-in file/bash tools, either with rounded frames
  * (`enabled`) or with their plain stock definitions (`!enabled`, restores
@@ -252,18 +262,89 @@ export function registerRoundedTools(pi: ExtensionAPI, enabled: boolean, cwd: st
 
 /**
  * Manager class encapsulating rounded tools registration and lifecycle updates.
+ *
+ * In addition to wrapping the 7 built-in tools, it installs a
+ * `pi.registerTool` proxy so that third-party tools (e.g. pi-fff's ffgrep,
+ * fffind, fff-multi-grep) are automatically wrapped with rounded frames
+ * when `roundedTools` is enabled.
+ *
+ * **Load-order requirement**: pi-tui-footer must load **before** pi-fff so
+ * that the proxy is in place when pi-fff calls `pi.registerTool()`. In
+ * `~/.pi/agent/settings.json`, place `"npm:pi-tui-footer"` before
+ * `"npm:@ff-labs/pi-fff"` in the `packages` array.
+ *
+ * The proxy captures each incoming third-party definition and wraps it
+ * on the fly. `init()` and `apply()` re-register captured definitions
+ * when `enabled` is toggled or the session cwd changes.
  */
 export class RoundedToolsManager {
-	constructor(private readonly pi: ExtensionAPI) {}
+	private enabled = false;
+	private proxyInstalled = false;
+	/** The real `pi.registerTool` before we installed the proxy. */
+	private originalRegisterTool!: (tool: ToolDef) => void;
+	/** Original (unwrapped) definitions captured from third-party tools. */
+	private readonly captured = new Map<string, ToolDef>();
+
+	constructor(private readonly pi: ExtensionAPI) {
+		// Install the proxy as early as possible so that third-party
+		// extensions loaded after us (but before init()) are captured.
+		this.installProxy();
+	}
 
 	/** Register initial tools before session_start with fallback cwd. */
 	init(enabled: boolean, cwd = process.cwd()): void {
+		this.enabled = enabled;
+		this.installProxy();
 		registerRoundedTools(this.pi, enabled, cwd);
+		this.reRegisterCaptured();
 	}
 
 	/** Apply tools with current session cwd. */
 	apply(enabled: boolean, cwd: string): void {
+		this.enabled = enabled;
+		this.installProxy();
 		registerRoundedTools(this.pi, enabled, cwd);
+		this.reRegisterCaptured();
+	}
+
+	/**
+	 * Install a one-time proxy on `pi.registerTool` to intercept third-party
+	 * tool registrations. The proxy captures the original definition and
+	 * conditionally wraps it.
+	 */
+	private installProxy(): void {
+		if (this.proxyInstalled) return;
+		this.proxyInstalled = true;
+
+		this.originalRegisterTool = this.pi.registerTool.bind(this.pi);
+		const original = this.originalRegisterTool;
+		const self = this;
+
+		this.pi.registerTool = function proxyRegisterTool(tool: ToolDef) {
+			if (THIRD_PARTY_ROUNDED_NAMES.has(tool.name)) {
+				// Capture the original (unwrapped) definition.
+				// pi-fff may re-register its tools (e.g. mode change), so
+				// only capture if it's not already a wrapped version (no
+				// renderShell: "self" means it's the original).
+				if (tool.renderShell !== "self") {
+					self.captured.set(tool.name, tool);
+				}
+				original(self.enabled ? wrapBuiltin(tool) : tool);
+				return;
+			}
+			original(tool);
+		};
+	}
+
+	/**
+	 * Re-register all captured third-party tools with or without rounded
+	 * frames based on the current `enabled` state. Handles the case where
+	 * third-party extensions loaded before us.
+	 */
+	private reRegisterCaptured(): void {
+		for (const def of this.captured.values()) {
+			this.originalRegisterTool(this.enabled ? wrapBuiltin(def) : def);
+		}
 	}
 }
 
