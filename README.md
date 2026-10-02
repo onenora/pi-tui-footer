@@ -45,9 +45,9 @@ pi update --extensions
 
 ### 圆角工具框与第三方工具
 
-`roundedTools` 开启时，除 8 个内置工具（read、write、edit、bash、powershell、grep、find、ls）外，也会自动拦截并为第三方扩展注册的工具（如 pi-fff 的 `ffgrep`、`fffind`、`fff-multi-grep`，或其 override 模式接管的 `grep`/`find`）添加圆角边框。
+`roundedTools` 会为 Pi 内置工具（read、write、edit、bash、powershell、grep、find、ls）添加圆角边框。第三方扩展注册的自定义工具不会自动添加圆角边框。
 
-**加载顺序**：需要在 `~/.pi/agent/settings.json` 的 `packages` 中将 `pi-tui-footer` 排在第三方扩展（如 `@ff-labs/pi-fff`）**之前**，以确保 proxy 在工具注册前生效：
+若第三方扩展会覆盖同名内置工具，请在 `~/.pi/agent/settings.json` 的 `packages` 中将 `pi-tui-footer` 放在该扩展之后。Pi 按扩展加载顺序处理同名工具，先注册的定义生效；此顺序可保留第三方工具的执行实现：
 
 ```json
 {

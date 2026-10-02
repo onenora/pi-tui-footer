@@ -47,6 +47,7 @@ export class RoundedFrame implements Component {
 		private inner: Component,
 		private border: (text: string) => string,
 		private mode: FrameMode = "closed",
+		private colorKey: string = "border",
 	) {}
 
 	getInner(): Component {
@@ -64,10 +65,16 @@ export class RoundedFrame implements Component {
 		}
 	}
 
-	update(inner: Component, border: (text: string) => string, mode: FrameMode): this {
-		if (this.inner !== inner || this.mode !== mode) {
+	update(
+		inner: Component,
+		border: (text: string) => string,
+		mode: FrameMode,
+		colorKey: string,
+	): this {
+		if (this.inner !== inner || this.mode !== mode || this.colorKey !== colorKey) {
 			this.inner = inner;
 			this.mode = mode;
+			this.colorKey = colorKey;
 			this.invalidate();
 		}
 		this.border = border;
@@ -169,7 +176,7 @@ const frame = (
 	theme: { fg: (color: string, text: string) => string },
 	mode: FrameMode = "closed",
 	colorKey: string = "border",
-): RoundedFrame => new RoundedFrame(inner, (t) => theme.fg(colorKey, t), mode);
+): RoundedFrame => new RoundedFrame(inner, (t) => theme.fg(colorKey, t), mode, colorKey);
 
 function borderColorFor(
 	context: { isPartial?: boolean; isError?: boolean } | undefined,
@@ -215,7 +222,7 @@ export function wrapBuiltin(def: ToolDef): ToolDef {
 
 			let callFrame: RoundedFrame;
 			if (context?.lastComponent instanceof RoundedFrame) {
-				callFrame = context.lastComponent.update(inner, borderFn, mode);
+				callFrame = context.lastComponent.update(inner, borderFn, mode, borderColorFor(context));
 			} else {
 				callFrame = frame(inner, theme, mode, borderColorFor(context));
 			}
@@ -242,7 +249,7 @@ export function wrapBuiltin(def: ToolDef): ToolDef {
 			const borderFn = (t: string) => theme.fg(borderColorFor(context), t);
 
 			if (context?.lastComponent instanceof RoundedFrame) {
-				return context.lastComponent.update(inner, borderFn, "open-top");
+				return context.lastComponent.update(inner, borderFn, "open-top", borderColorFor(context));
 			}
 			return frame(inner, theme, "open-top", borderColorFor(context));
 		},
@@ -273,7 +280,7 @@ export function registerRoundedTools(
 	if (typeof target !== "function" && target.getActiveTools) {
 		try {
 			const active = target.getActiveTools();
-			if (Array.isArray(active) && active.length > 0) {
+			if (Array.isArray(active)) {
 				activeToolNames = new Set(active);
 			}
 		} catch {
@@ -287,7 +294,7 @@ export function registerRoundedTools(
 		write: () => createWriteToolDefinition(cwd),
 		edit: () => createEditToolDefinition(cwd),
 		bash: () => createBashToolDefinition(cwd, { commandPrefix: shellCommandPrefix, shellPath }),
-		powershell: () => createPowerShellToolDefinition(cwd, { shellPath }),
+		powershell: () => createPowerShellToolDefinition(cwd),
 		ls: () => createLsToolDefinition(cwd),
 		grep: () => createGrepToolDefinition(cwd),
 		find: () => createFindToolDefinition(cwd),
