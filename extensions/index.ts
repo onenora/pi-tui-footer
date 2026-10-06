@@ -224,21 +224,16 @@ export default function (pi: ExtensionAPI) {
 		requestFooterRender?.();
 	};
 
-	const applyRoundedTools = (ctx: ExtensionContext) => {
-		roundedTools.apply(config.enabled && config.roundedTools, ctx.cwd);
+	const applyRoundedTools = () => {
+		roundedTools.setEnabled(config.enabled && config.roundedTools);
 	};
 
-	// Register rounded tool renderers at load time (before session_start) so a
-	// /reload transcript rebuild — which pi runs BEFORE emitting session_start —
-	// constructs historical tool-call components with the wrapped renderers.
-	// session_start re-registers with the real session cwd afterwards, which
-	// corrects the execute closure for relative-path tools. Toggling the
-	// setting re-registers for new components; already-rendered historical
-	// components keep their current frames until the next transcript rebuild
-	// (compaction / resume / tree navigation / thinking-block toggle).
-	const initialConfig = loadConfig();
-	config = initialConfig;
-	roundedTools.init(initialConfig.enabled && initialConfig.roundedTools);
+	// The renderer resolver is installed when RoundedToolsManager is constructed
+	// (before session_start), so a /reload transcript rebuild already uses it.
+	// Toggling the setting affects components created afterwards; already-rendered
+	// historical components keep their frames until the next transcript rebuild.
+	config = loadConfig();
+	applyRoundedTools();
 
 	const refreshInteractiveState = (ctx: ExtensionContext, project = false) => {
 		if (!sessionLifecycle.isCurrent() || !ctx.hasUI) return;
@@ -280,7 +275,7 @@ export default function (pi: ExtensionAPI) {
 		clearPeekLabel(ctx);
 
 		applyUi(ctx);
-		applyRoundedTools(ctx);
+		applyRoundedTools();
 
 		refreshInteractiveState(ctx, true);
 	});
@@ -437,8 +432,8 @@ export default function (pi: ExtensionAPI) {
 			if (lastCtx) {
 				pendingUiChange = getPendingUiChange(newConfig.enabled, active);
 			}
-			if (lastCtx && (wasRoundedTools !== newConfig.roundedTools || wasEnabled !== newConfig.enabled)) {
-				applyRoundedTools(lastCtx);
+			if (wasRoundedTools !== newConfig.roundedTools || wasEnabled !== newConfig.enabled) {
+				applyRoundedTools();
 			}
 			const gitNeeded = newConfig.footerSegments.gitBranch || newConfig.footerSegments.gitStatus || newConfig.footerSegments.gitCommit;
 			if (lastCtx && gitNeeded) {

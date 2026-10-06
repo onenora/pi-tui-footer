@@ -17,7 +17,7 @@ pi install git:github.com/onenora/pi-tui-footer
 固定版本：
 
 ```bash
-pi install git:github.com/onenora/pi-tui-footer@v1.2.4
+pi install git:github.com/onenora/pi-tui-footer@v1.3.0
 ```
 
 更新：
@@ -43,24 +43,22 @@ pi update --extensions
 
 也可在 pi 内通过 `/pi-tui` 命令调整。
 
-### 圆角工具框与第三方工具
+### 圆角工具框
 
-`roundedTools` 会为 Pi 内置工具（read、write、edit、bash、powershell、grep、find、ls）添加圆角边框。第三方扩展注册的自定义工具不会自动添加圆角边框。
+需要 pi >= 1.0.4（依赖 `pi.registerToolRenderer()`）。旧版本不会报错，但圆角工具框不生效。
 
-若第三方扩展会覆盖同名内置工具，请在 `~/.pi/agent/settings.json` 的 `packages` 中将 `pi-tui-footer` 放在该扩展之后。Pi 按扩展加载顺序处理同名工具，先注册的定义生效；此顺序可保留第三方工具的执行实现：
+`roundedTools` 通过渲染器解析器包装工具调用/结果的显示，不重新注册工具，不改变工具定义、执行逻辑和激活状态。覆盖范围：
 
-```json
-{
-  "packages": [
-    "npm:pi-tui-footer",
-    "npm:@ff-labs/pi-fff"
-  ]
-}
-```
+- 内置工具：read、write、bash、powershell、grep、find、ls（edit 自带外框，保持原样）
+- pi-fff 工具：ffgrep、fffind、fff-multi-grep
+
+按工具名匹配，与扩展加载顺序无关。其他第三方工具不会自动添加圆角边框；需要时将工具名加入 `extensions/rounded-tools.ts` 的 `ROUNDED_TOOL_NAMES`。
+
+切换 `roundedTools` 后，新的工具调用立即生效，已渲染的历史记录在下次重建（`/reload`、恢复会话、压缩）时更新。
 
 ## 致谢
 
-本项目是以下两个开源项目的深度融合集成：
+本项目can以下两个开源项目的集成：
 
 - [pi-open-tui](https://github.com/OldSuns/pi-open-tui) — 头部、底部、编辑器、遥测和设置界面的整体结构
 - [pi-rounded-tools](https://github.com/orionpax1997/pi-rounded-tools) — 圆角工具调用/结果框

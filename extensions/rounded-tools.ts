@@ -1,31 +1,20 @@
 /**
  * Rounded tool frames — rounded frames for tool calls and results.
  *
- * Re-registers built-in tools (read, write, bash, powershell, grep, find, ls)
- * with `renderShell: "self"` and wraps each tool call / result in a frame
- * drawn with Unicode rounded-corner characters (╭ ╮ ╰ ╯ ─ │).
+ * Uses `pi.registerToolRenderer()` to wrap the renderers of built-in tools
+ * (read, write, bash, powershell, grep, find, ls, plus pi-fff's ffgrep, fffind,
+ * fff-multi-grep) with `renderShell: "self"`
+ * and a frame drawn with Unicode rounded-corner characters (╭ ╮ ╰ ╯ ─ │).
+ * Tool definitions, execution and active-tool state are left untouched.
  *
- * Tools that already render their own shell (e.g. `edit` in modern Pi versions)
- * are preserved as-is to avoid duplicate nesting and UI glitches.
+ * Tools that already render their own shell (e.g. `edit`) are preserved as-is
+ * to avoid duplicate nesting and UI glitches.
  *
  * Border color follows `theme.fg("border", ...)` so it adapts to your theme,
  * using warning (yellow) during pending/streaming execution and error (red) on failure.
- *
- * Non-default tools (grep, find, ls, powershell) preserve `defaultActive: false`
- * to avoid polluting the model's active toolset.
  */
 
-import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import {
-	createBashToolDefinition,
-	createEditToolDefinition,
-	createFindToolDefinition,
-	createGrepToolDefinition,
-	createLsToolDefinition,
-	createPowerShellToolDefinition,
-	createReadToolDefinition,
-	createWriteToolDefinition,
-} from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ToolRenderers } from "@earendil-works/pi-coding-agent";
 import type { Component, TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
@@ -195,13 +184,25 @@ const EMPTY_COMPONENT: Component = { render: () => [], invalidate: () => {} };
 
 // ─── Tool wrapping ──────────────────────────────────────────────────────
 
-type ToolDef = ToolDefinition<any, any, any>;
+const ROUNDED_TOOL_NAMES: ReadonlySet<string> = new Set([
+	"read",
+	"write",
+	"bash",
+	"powershell",
+	"grep",
+	"find",
+	"ls",
+	// pi-fff (@ff-labs/pi-fff) tools; resolvers match by name, so load order is irrelevant.
+	"ffgrep",
+	"fffind",
+	"fff-multi-grep",
+]);
 
 function unwrapInner(component: unknown): Component | undefined {
 	return component instanceof RoundedFrame ? component.getInner() : (component as Component | undefined);
 }
 
-export function wrapBuiltin(def: ToolDef): ToolDef {
+export function wrapRenderers(def: ToolRenderers): ToolRenderers {
 	// Tools that already manage their own shell (e.g. edit) should remain untouched.
 	if (def.renderShell === "self") {
 		return def;
@@ -260,89 +261,26 @@ export function wrapBuiltin(def: ToolDef): ToolDef {
 	};
 }
 
-// ─── Built-in tool factories ─────────────────────────────────────────────
-
-type BuiltinFactory = (cwd: string, opts: BuiltinFactoryOpts) => ToolDef;
-interface BuiltinFactoryOpts {
-	autoResizeImages?: boolean;
-	commandPrefix?: string;
-	shellPath?: string;
-}
-
-const BUILTIN_FACTORIES: ReadonlyMap<string, BuiltinFactory> = new Map<string, BuiltinFactory>([
-	["read", (cwd, opts) => createReadToolDefinition(cwd, { autoResizeImages: opts.autoResizeImages })],
-	["write", (cwd) => createWriteToolDefinition(cwd)],
-	["edit", (cwd) => createEditToolDefinition(cwd)],
-	["bash", (cwd, opts) => createBashToolDefinition(cwd, { commandPrefix: opts.commandPrefix, shellPath: opts.shellPath })],
-	["powershell", (cwd) => createPowerShellToolDefinition(cwd)],
-	["ls", (cwd) => createLsToolDefinition(cwd)],
-	["grep", (cwd) => createGrepToolDefinition(cwd)],
-	["find", (cwd) => createFindToolDefinition(cwd)],
-]);
-
-const DEFAULT_ACTIVE_TOOLS = new Set(["read", "bash", "edit", "write"]);
-
-// ─── Registration ────────────────────────────────────────────────────────
-
-export function registerRoundedTools(
-	target: ExtensionAPI | ((tool: ToolDef) => void),
-	enabled: boolean,
-	cwd: string,
-	opts?: BuiltinFactoryOpts,
-	activeToolNames?: Set<string>,
-): void {
-	const register = typeof target === "function" ? target : target.registerTool.bind(target);
-	const defaultActiveNames = activeToolNames ?? DEFAULT_ACTIVE_TOOLS;
-
-	for (const [name, factory] of BUILTIN_FACTORIES) {
-		const rawDef = factory(cwd, opts ?? {});
-		// Skip tools that already manage their own shell framing (e.g. edit)
-		if (rawDef.renderShell === "self") continue;
-
-		const baseDef: ToolDef = {
-			...rawDef,
-			defaultActive: defaultActiveNames.has(name),
-		};
-
-		register(enabled ? wrapBuiltin(baseDef) : baseDef);
-	}
-}
-
 // ─── Manager ─────────────────────────────────────────────────────────────
 
 export class RoundedToolsManager {
-	private factoryOpts: BuiltinFactoryOpts = {};
-	private activeToolNames: Set<string> = DEFAULT_ACTIVE_TOOLS;
+	private enabled = false;
 
-	constructor(private readonly pi: ExtensionAPI) {}
-
-	/** Re-read settings and active tools; keeps previous values if the runtime is not ready. */
-	private refreshSettings(): void {
-		try {
-			const settings = this.pi.getSettings?.();
-			this.factoryOpts = {
-				autoResizeImages: settings?.images?.autoResize ?? true,
-				commandPrefix: settings?.shellCommandPrefix,
-				shellPath: settings?.shellPath,
-			};
-		} catch {
-			// runtime not initialized yet during early load
-		}
-		try {
-			const active = this.pi.getActiveTools?.();
-			if (Array.isArray(active)) this.activeToolNames = new Set(active);
-		} catch {
-			// runtime not initialized yet during early load
-		}
+	/**
+	 * Install the renderer resolver once at extension load. Toggling `enabled`
+	 * affects tool components created afterwards (resume / reload / new calls).
+	 */
+	constructor(pi: ExtensionAPI) {
+		pi.registerToolRenderer?.((toolName, next) => {
+			const base = next();
+			if (!base || !this.enabled || !ROUNDED_TOOL_NAMES.has(toolName)) return base;
+			// Nothing to frame: let pi use its own fallback rendering.
+			if (!base.renderCall && !base.renderResult) return base;
+			return wrapRenderers(base);
+		});
 	}
 
-	/** Register tools with the given cwd (initial load uses process.cwd() before session_start). */
-	apply(enabled: boolean, cwd: string): void {
-		this.refreshSettings();
-		registerRoundedTools(this.pi, enabled, cwd, this.factoryOpts, this.activeToolNames);
-	}
-
-	init(enabled: boolean, cwd = process.cwd()): void {
-		this.apply(enabled, cwd);
+	setEnabled(enabled: boolean): void {
+		this.enabled = enabled;
 	}
 }
