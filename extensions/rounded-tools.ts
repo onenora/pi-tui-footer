@@ -38,6 +38,18 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 
 export type FrameMode = "closed" | "open-bottom" | "open-top";
 
+// ─── Border color ────────────────────────────────────────────────────────
+
+type RenderContext = { isPartial?: boolean; isError?: boolean };
+
+function borderColorFor(context: RenderContext | undefined): string {
+	if (context?.isError) return "error";
+	if (context?.isPartial) return "warning";
+	return "border";
+}
+
+// ─── RoundedFrame component ─────────────────────────────────────────────
+
 export class RoundedFrame implements Component {
 	private cachedWidth: number | undefined;
 	private cachedInnerLines: string[] | undefined;
@@ -142,9 +154,8 @@ export class RoundedFrame implements Component {
 			return this.cachedLines;
 		}
 
-		const horizontal = "─".repeat(Math.max(0, width - 2));
+		const horizontal = "─".repeat(width - 2);
 		const side = this.border("│");
-
 		const out: string[] = [];
 
 		if (this.mode !== "open-top") {
@@ -153,8 +164,7 @@ export class RoundedFrame implements Component {
 
 		if (innerLines.length > 0) {
 			for (const line of innerLines) {
-				const vis = visibleWidth(line);
-				const pad = " ".repeat(Math.max(0, innerWidth - vis));
+				const pad = " ".repeat(Math.max(0, innerWidth - visibleWidth(line)));
 				out.push(side + " " + line + pad + " " + side);
 			}
 		} else if (this.mode === "closed") {
@@ -164,6 +174,7 @@ export class RoundedFrame implements Component {
 		if (this.mode !== "open-bottom") {
 			out.push(this.border("╰" + horizontal + "╯"));
 		}
+
 		this.cachedWidth = width;
 		this.cachedInnerLines = innerLines;
 		this.cachedLines = out;
@@ -171,32 +182,23 @@ export class RoundedFrame implements Component {
 	}
 }
 
-const frame = (
+// ─── Frame factories ────────────────────────────────────────────────────
+
+const createFrame = (
 	inner: Component,
 	theme: { fg: (color: string, text: string) => string },
 	mode: FrameMode = "closed",
 	colorKey: string = "border",
 ): RoundedFrame => new RoundedFrame(inner, (t) => theme.fg(colorKey, t), mode, colorKey);
 
-function borderColorFor(
-	context: { isPartial?: boolean; isError?: boolean } | undefined,
-): string {
-	if (context?.isError) return "error";
-	if (context?.isPartial) return "warning";
-	return "border";
-}
+const EMPTY_COMPONENT: Component = { render: () => [], invalidate: () => {} };
 
-// ─── Helpers ─────────────────────────────────────────────────────────────
+// ─── Tool wrapping ──────────────────────────────────────────────────────
 
 type ToolDef = ToolDefinition<any, any, any>;
 
-const EMPTY_COMPONENT: Component = { render: () => [], invalidate: () => {} };
-
 function unwrapInner(component: unknown): Component | undefined {
-	if (component instanceof RoundedFrame) {
-		return component.getInner();
-	}
-	return component as Component | undefined;
+	return component instanceof RoundedFrame ? component.getInner() : (component as Component | undefined);
 }
 
 export function wrapBuiltin(def: ToolDef): ToolDef {
@@ -218,13 +220,14 @@ export function wrapBuiltin(def: ToolDef): ToolDef {
 			// close the bottom border so it renders as a complete box instead of an open frame.
 			const isPendingWithoutResult = Boolean(context?.isPartial && !context?.state?.__hasResult);
 			const mode: FrameMode = def.renderResult && !isPendingWithoutResult ? "open-bottom" : "closed";
-			const borderFn = (t: string) => theme.fg(borderColorFor(context), t);
+			const colorKey = borderColorFor(context);
+			const borderFn = (t: string) => theme.fg(colorKey, t);
 
 			let callFrame: RoundedFrame;
 			if (context?.lastComponent instanceof RoundedFrame) {
-				callFrame = context.lastComponent.update(inner, borderFn, mode, borderColorFor(context));
+				callFrame = context.lastComponent.update(inner, borderFn, mode, colorKey);
 			} else {
-				callFrame = frame(inner, theme, mode, borderColorFor(context));
+				callFrame = createFrame(inner, theme, mode, colorKey);
 			}
 
 			if (context?.state) {
@@ -246,91 +249,100 @@ export function wrapBuiltin(def: ToolDef): ToolDef {
 			const inner: Component = def.renderResult
 				? def.renderResult(result, options, theme, { ...context, lastComponent: unwrapped })
 				: EMPTY_COMPONENT;
-			const borderFn = (t: string) => theme.fg(borderColorFor(context), t);
+			const colorKey = borderColorFor(context);
+			const borderFn = (t: string) => theme.fg(colorKey, t);
 
 			if (context?.lastComponent instanceof RoundedFrame) {
-				return context.lastComponent.update(inner, borderFn, "open-top", borderColorFor(context));
+				return context.lastComponent.update(inner, borderFn, "open-top", colorKey);
 			}
-			return frame(inner, theme, "open-top", borderColorFor(context));
+			return createFrame(inner, theme, "open-top", colorKey);
 		},
 	};
 }
+
+// ─── Built-in tool factories ─────────────────────────────────────────────
+
+type BuiltinFactory = (cwd: string, opts: BuiltinFactoryOpts) => ToolDef;
+interface BuiltinFactoryOpts {
+	autoResizeImages?: boolean;
+	commandPrefix?: string;
+	shellPath?: string;
+}
+
+const BUILTIN_FACTORIES: ReadonlyMap<string, BuiltinFactory> = new Map<string, BuiltinFactory>([
+	["read", (cwd, opts) => createReadToolDefinition(cwd, { autoResizeImages: opts.autoResizeImages })],
+	["write", (cwd) => createWriteToolDefinition(cwd)],
+	["edit", (cwd) => createEditToolDefinition(cwd)],
+	["bash", (cwd, opts) => createBashToolDefinition(cwd, { commandPrefix: opts.commandPrefix, shellPath: opts.shellPath })],
+	["powershell", (cwd) => createPowerShellToolDefinition(cwd)],
+	["ls", (cwd) => createLsToolDefinition(cwd)],
+	["grep", (cwd) => createGrepToolDefinition(cwd)],
+	["find", (cwd) => createFindToolDefinition(cwd)],
+]);
+
+const DEFAULT_ACTIVE_TOOLS = new Set(["read", "bash", "edit", "write"]);
+
+// ─── Registration ────────────────────────────────────────────────────────
 
 export function registerRoundedTools(
 	target: ExtensionAPI | ((tool: ToolDef) => void),
 	enabled: boolean,
 	cwd: string,
-	_captured?: Map<string, ToolDef>,
+	opts?: BuiltinFactoryOpts,
+	activeToolNames?: Set<string>,
 ): void {
 	const register = typeof target === "function" ? target : target.registerTool.bind(target);
+	const defaultActiveNames = activeToolNames ?? DEFAULT_ACTIVE_TOOLS;
 
-	let settings: any;
-	if (typeof target !== "function" && target.getSettings) {
-		try {
-			settings = target.getSettings();
-		} catch {
-			// runtime not initialized yet during early load
-		}
-	}
-	const autoResizeImages = settings?.images?.autoResize ?? true;
-	const shellCommandPrefix = settings?.shellCommandPrefix;
-	const shellPath = settings?.shellPath;
-
-	let activeToolNames: Set<string> | undefined;
-	if (typeof target !== "function" && target.getActiveTools) {
-		try {
-			const active = target.getActiveTools();
-			if (Array.isArray(active)) {
-				activeToolNames = new Set(active);
-			}
-		} catch {
-			// runtime not initialized yet during early load
-		}
-	}
-	const defaultActiveNames = activeToolNames ?? new Set(["read", "bash", "edit", "write"]);
-
-	const builtins: Record<string, () => ToolDef> = {
-		read: () => createReadToolDefinition(cwd, { autoResizeImages }),
-		write: () => createWriteToolDefinition(cwd),
-		edit: () => createEditToolDefinition(cwd),
-		bash: () => createBashToolDefinition(cwd, { commandPrefix: shellCommandPrefix, shellPath }),
-		powershell: () => createPowerShellToolDefinition(cwd),
-		ls: () => createLsToolDefinition(cwd),
-		grep: () => createGrepToolDefinition(cwd),
-		find: () => createFindToolDefinition(cwd),
-	};
-
-	for (const [name, factory] of Object.entries(builtins)) {
-		const rawDef = factory();
+	for (const [name, factory] of BUILTIN_FACTORIES) {
+		const rawDef = factory(cwd, opts ?? {});
 		// Skip tools that already manage their own shell framing (e.g. edit)
-		if (rawDef.renderShell === "self") {
-			continue;
-		}
+		if (rawDef.renderShell === "self") continue;
 
-		const shouldBeActive = defaultActiveNames.has(name);
 		const baseDef: ToolDef = {
 			...rawDef,
-			defaultActive: shouldBeActive,
+			defaultActive: defaultActiveNames.has(name),
 		};
 
 		register(enabled ? wrapBuiltin(baseDef) : baseDef);
 	}
 }
 
+// ─── Manager ─────────────────────────────────────────────────────────────
+
 export class RoundedToolsManager {
-	private enabled = false;
+	private factoryOpts: BuiltinFactoryOpts = {};
+	private activeToolNames: Set<string> = DEFAULT_ACTIVE_TOOLS;
 
 	constructor(private readonly pi: ExtensionAPI) {}
 
-	/** Register initial tools before session_start with fallback cwd. */
-	init(enabled: boolean, cwd = process.cwd()): void {
-		this.enabled = enabled;
-		registerRoundedTools(this.pi, enabled, cwd);
+	/** Re-read settings and active tools; keeps previous values if the runtime is not ready. */
+	private refreshSettings(): void {
+		try {
+			const settings = this.pi.getSettings?.();
+			this.factoryOpts = {
+				autoResizeImages: settings?.images?.autoResize ?? true,
+				commandPrefix: settings?.shellCommandPrefix,
+				shellPath: settings?.shellPath,
+			};
+		} catch {
+			// runtime not initialized yet during early load
+		}
+		try {
+			const active = this.pi.getActiveTools?.();
+			if (Array.isArray(active)) this.activeToolNames = new Set(active);
+		} catch {
+			// runtime not initialized yet during early load
+		}
 	}
 
-	/** Apply tools with current session cwd. */
+	/** Register tools with the given cwd (initial load uses process.cwd() before session_start). */
 	apply(enabled: boolean, cwd: string): void {
-		this.enabled = enabled;
-		registerRoundedTools(this.pi, enabled, cwd);
+		this.refreshSettings();
+		registerRoundedTools(this.pi, enabled, cwd, this.factoryOpts, this.activeToolNames);
+	}
+
+	init(enabled: boolean, cwd = process.cwd()): void {
+		this.apply(enabled, cwd);
 	}
 }
