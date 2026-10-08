@@ -2,210 +2,159 @@
 /**
  * scripts/sync-upstream.ts
  *
- * Automated helper to inspect and synchronize upstream pi-open-tui & pi-rounded-tools updates.
+ * Tracks pi-open-tui, the upstream this extension is integrated from. The integrated version is the
+ * "pi-open-tui (vX.Y.Z" marker in extensions/index.ts. pi-rounded-tools is not tracked: the local
+ * rounded-tools.ts is built on pi.registerToolRenderer(), so there is nothing to merge from upstream.
  *
  * Usage:
- *   bun run sync           # Check versions, download latest pi-open-tui, and show diff / sync status
- *   bun run sync --apply   # Download latest pi-open-tui, update identical files, and preserve local integrations
- *   bun run sync --check   # Check if upstream has newer versions available
+ *   bun run sync:check   # compare the integrated version with the latest on npm
+ *   bun run sync         # download both versions and report what changed upstream (writes nothing)
+ *   bun run sync:apply   # also copy upstream changes into files that have no local changes
+ *
+ * A file is only overwritten while it is still identical to upstream's copy at the integrated version.
+ * Files with local changes are listed for a manual merge, the version marker stays put until none are
+ * left, and the downloaded copies are kept for `git merge-file`.
  */
 
 import { execSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, copyFileSync } from "node:fs";
-import { join } from "node:path";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const ROOT_DIR = join(import.meta.dirname, "..");
 const EXT_DIR = join(ROOT_DIR, "extensions");
+const INDEX_PATH = join(EXT_DIR, "index.ts");
+const PACKAGE = "pi-open-tui";
+const MARKER = /(pi-open-tui \(v)(\d+\.\d+\.\d+)/;
 
-// Files that are 100% upstream-identical and safe to copy directly from open-tui
-const PURE_UPSTREAM_FILES = [
-	"editor.ts",
-	"git.ts",
-	"header.ts",
-	"icons.ts",
-	"peek.ts",
-	"runtime.ts",
-	"session-lifecycle.ts",
-	"state.ts",
-	"telemetry.ts",
-	"utils.ts",
-];
+function fail(message: string): never {
+	throw new Error(message);
+}
 
-// Files that have custom integrations (rounded-tools, customized icons, etc.)
-// These require patch preservation or manual verification
-const INTEGRATION_FILES = [
-	"config.ts",           // Has LocalFeatureConfig (roundedTools)
-	"footer.ts",           // Has half-height parallelogram blocks (▰/▱)
-	"index.ts",            // Has roundedTools lifecycle hooks
-	"settings-command.ts", // Has roundedTools settings row & dual command registration
-	"rounded-tools.ts",    // Local-only module from pi-rounded-tools
-];
+function integratedVersion(): string {
+	return MARKER.exec(readFileSync(INDEX_PATH, "utf8"))?.[2] ?? fail(`no "${PACKAGE} (vX.Y.Z" marker in extensions/index.ts`);
+}
 
-function run(cmd: string): string {
+function latestVersion(): string {
+	let version = "";
 	try {
-		return execSync(cmd, { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }).trim();
-	} catch (err) {
-		return "";
+		version = execSync(`npm view ${PACKAGE} version`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+	} catch {
+		// reported below
 	}
+	return /^\d+\.\d+\.\d+$/.test(version) ? version : fail("cannot read the latest version from the npm registry");
 }
 
-function getLatestNpmVersion(pkg: string): string {
-	return run(`npm view ${pkg} version 2>/dev/null`) || "unknown";
+function isNewer(a: string, b: string): boolean {
+	const [x, y] = [a, b].map((version) => version.split(".").map(Number)) as [number[], number[]];
+	const i = x.findIndex((part, k) => part !== y[k]);
+	return i >= 0 && x[i]! > y[i]!;
 }
 
-function parseCurrentOpenTuiVersion(): string {
-	const content = readFileSync(join(EXT_DIR, "rounded-tools.ts"), "utf8");
-	const match = content.match(/pi-open-tui\s+v?(\d+\.\d+\.\d+)/);
-	return match ? match[1]! : "unknown";
+const filesIn = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).filter((e) => e.isFile()).map((e) => e.name);
+const read = (path: string): string | undefined => (existsSync(path) ? readFileSync(path, "utf8").replace(/\r\n/g, "\n") : undefined);
+
+/** Download pi-open-tui@version into workDir/label and return the directory with its extension files. */
+function fetchUpstream(version: string, label: string, workDir: string): string {
+	const pack = join(workDir, `${label}.pack`);
+	mkdirSync(pack);
+	execSync(`npm pack ${PACKAGE}@${version} --pack-destination "${pack}" --quiet`, { stdio: ["ignore", "ignore", "inherit"] });
+	const tgz = readdirSync(pack).find((file) => file.endsWith(".tgz")) ?? fail(`could not download ${PACKAGE}@${version}`);
+	execSync(`tar -xzf "${join(pack, tgz)}" -C "${pack}"`);
+	const source = join(pack, "package", "extensions", "open-tui");
+	if (!existsSync(source)) fail(`${PACKAGE}@${version} has no extensions/open-tui directory`);
+	const dest = join(workDir, label);
+	renameSync(source, dest);
+	rmSync(pack, { recursive: true, force: true });
+	// Upstream ships CRLF files; this repo is LF. Normalize so comparing, copying and merging all agree.
+	for (const file of filesIn(dest)) writeFileSync(join(dest, file), read(join(dest, file))!);
+	return dest;
 }
 
-function parseCurrentRoundedToolsVersion(): string {
-	const content = readFileSync(join(EXT_DIR, "rounded-tools.ts"), "utf8");
-	const match = content.match(/pi-rounded-tools@(\d+\.\d+\.\d+)/);
-	return match ? match[1]! : "unknown";
-}
-
-async function main() {
+function main() {
 	const args = process.argv.slice(2);
 	const checkOnly = args.includes("--check");
 	const apply = args.includes("--apply");
 
-	console.log("=== Upstream Version Check ===");
-	const curOpenTui = parseCurrentOpenTuiVersion();
-	const curRounded = parseCurrentRoundedToolsVersion();
-	const latestOpenTui = getLatestNpmVersion("pi-open-tui");
-	const latestRounded = getLatestNpmVersion("pi-rounded-tools");
-
-	console.log(`pi-open-tui:     local v${curOpenTui}  ->  npm v${latestOpenTui}`);
-	console.log(`pi-rounded-tools: local v${curRounded}  ->  npm v${latestRounded}`);
-
-	const openTuiHasUpdate = latestOpenTui !== "unknown" && latestOpenTui !== curOpenTui;
-	const roundedHasUpdate = latestRounded !== "unknown" && latestRounded !== curRounded;
-
-	if (!openTuiHasUpdate && !roundedHasUpdate) {
-		console.log("\nAll integrated upstreams are up to date!");
-		if (checkOnly || !apply) return;
-	} else {
-		console.log(`\nUpdates available:${openTuiHasUpdate ? ` [pi-open-tui -> v${latestOpenTui}]` : ""}${roundedHasUpdate ? ` [pi-rounded-tools -> v${latestRounded}]` : ""}`);
+	const integrated = integratedVersion();
+	const latest = latestVersion();
+	console.log(`${PACKAGE}: integrated v${integrated}, npm latest v${latest}`);
+	if (integrated === latest) {
+		console.log("Up to date.");
+		return;
+	}
+	if (isNewer(integrated, latest)) {
+		console.log("The integrated version is newer than npm's latest; nothing to do.");
+		return;
+	}
+	if (checkOnly) {
+		console.log("Update available. Run `bun run sync` to see what changed upstream.");
+		return;
 	}
 
-	if (checkOnly) return;
-
-	// Prepare temp download directory
-	const workDir = join(tmpdir(), `pi-tui-sync-${Date.now()}`);
-	mkdirSync(workDir, { recursive: true });
-
+	const workDir = mkdtempSync(join(tmpdir(), "pi-tui-sync-"));
+	let keepWorkDir = false;
 	try {
-		console.log(`\nFetching pi-open-tui@${latestOpenTui}...`);
-		execSync(`npm pack pi-open-tui@${latestOpenTui} --quiet`, { cwd: workDir, stdio: "inherit" });
-		const tgz = readdirSync(workDir).find((f) => f.endsWith(".tgz"));
-		if (!tgz) {
-			console.error("Failed to download package tarball");
-			return;
-		}
-		execSync(`tar -xzf "${tgz}"`, { cwd: workDir });
-		const upstreamDir = join(workDir, "package", "extensions", "open-tui");
+		const baseDir = fetchUpstream(integrated, "base", workDir);
+		const latestDir = fetchUpstream(latest, "latest", workDir);
 
-		if (!existsSync(upstreamDir)) {
-			console.error(`Upstream path not found: ${upstreamDir}`);
-			return;
-		}
+		console.log(`\n=== Upstream changes v${integrated} -> v${latest} ===`);
+		const updates: string[] = [];
+		const merges: string[] = [];
+		let unchanged = 0;
+		const show = (tag: string, file: string, note = "") => console.log(`${`  [${tag}]`.padEnd(12)} ${file}${note && `  (${note})`}`);
 
-		console.log("\n=== Analyzing Differences ===");
-
-		let modifiedPure = 0;
-		for (const file of PURE_UPSTREAM_FILES) {
-			const upFile = join(upstreamDir, file);
-			const locFile = join(EXT_DIR, file);
-			if (!existsSync(upFile)) {
-				console.log(`  [Removed upstream] ${file}`);
-				continue;
-			}
-			if (!existsSync(locFile)) {
-				console.log(`  [New upstream]     ${file}`);
-				if (apply) {
-					copyFileSync(upFile, locFile);
-					console.log(`    -> Copied ${file}`);
+		for (const file of [...new Set([...filesIn(baseDir), ...filesIn(latestDir)])].sort()) {
+			const was = read(join(baseDir, file)); // upstream at the integrated version
+			const now = read(join(latestDir, file)); // upstream at the latest version
+			const mine = read(join(EXT_DIR, file)); // this repo
+			if (was === now) {
+				unchanged++;
+			} else if (now === undefined) {
+				if (mine !== undefined) {
+					merges.push(file);
+					show("removed", file, "removed upstream, still present locally");
 				}
-				modifiedPure++;
-				continue;
-			}
-			const upContent = readFileSync(upFile, "utf8").replace(/\r\n/g, "\n");
-			const locContent = readFileSync(locFile, "utf8").replace(/\r\n/g, "\n");
-			if (upContent !== locContent) {
-				console.log(`  [Changed upstream] ${file}`);
-				if (apply) {
-					writeFileSync(locFile, upContent, "utf8");
-					console.log(`    -> Updated ${file}`);
-				}
-				modifiedPure++;
+			} else if (mine === now) {
+				show("current", file, "already matches upstream");
+			} else if (mine === undefined && was !== undefined) {
+				merges.push(file);
+				show("merge", file, "deleted locally, changed upstream");
+			} else if (mine === undefined || mine === was) {
+				updates.push(file);
+				show(mine === undefined ? "new" : "update", file);
 			} else {
-				console.log(`  [Identical]        ${file}`);
+				merges.push(file);
+				show("merge", file, "has local changes");
 			}
 		}
+		console.log(`  ${unchanged} upstream file(s) unchanged`);
 
-		console.log("\n=== Integration Files Status ===");
-		for (const file of INTEGRATION_FILES) {
-			if (file === "rounded-tools.ts") {
-				console.log(`  [Local module]     ${file} (retains rounded tool frames)`);
-				continue;
-			}
-			const upFile = join(upstreamDir, file);
-			if (existsSync(upFile)) {
-				console.log(`  [Hybrid module]    ${file} (requires verified merge to retain rounded-tools integration)`);
-			}
-		}
-
-		if (apply) {
-			// Ensure half-height parallelogram blocks remain preserved in footer.ts
-			const footerPath = join(EXT_DIR, "footer.ts");
-			if (existsSync(footerPath)) {
-				let footerContent = readFileSync(footerPath, "utf8");
-				if (footerContent.includes('"█"') && footerContent.includes('"░"')) {
-					footerContent = footerContent
-						.replace('const filledCell = ascii ? "#" : "█";', 'const filledCell = ascii ? "#" : "▰";')
-						.replace('const emptyCell = ascii ? "-" : "░";', 'const emptyCell = ascii ? "-" : "▱";');
-					writeFileSync(footerPath, footerContent, "utf8");
-					console.log("  -> Preserved custom ▰/▱ blocks in footer.ts");
-				}
-			}
-
-			// Update version comments in rounded-tools.ts and index.ts
-			const roundedPath = join(EXT_DIR, "rounded-tools.ts");
-			if (existsSync(roundedPath)) {
-				let roundedContent = readFileSync(roundedPath, "utf8");
-				roundedContent = roundedContent.replace(
-					/pi-open-tui\s+v?\d+\.\d+\.\d+/,
-					`pi-open-tui v${latestOpenTui}`,
-				);
-				writeFileSync(roundedPath, roundedContent, "utf8");
-			}
-
-			const indexPath = join(EXT_DIR, "index.ts");
-			if (existsSync(indexPath)) {
-				let indexContent = readFileSync(indexPath, "utf8");
-				indexContent = indexContent.replace(
-					/pi-open-tui\s+\(v\d+\.\d+\.\d+/,
-					`pi-open-tui (v${latestOpenTui}`,
-				);
-				writeFileSync(indexPath, indexContent, "utf8");
-			}
-
-			console.log("\nRunning validation test...");
-			execSync("bun run check", { cwd: ROOT_DIR, stdio: "inherit" });
-			console.log("\nSync applied and validated successfully!");
+		const bump = merges.length === 0;
+		if (!apply) {
+			if (updates.length > 0 || bump) console.log(`\nRun \`bun run sync:apply\` to copy the updates${bump ? " and set the version marker" : ""}.`);
 		} else {
-			console.log("\nRun `bun run sync --apply` to apply the updates to pure upstream files.");
+			for (const file of updates) copyFileSync(join(latestDir, file), join(EXT_DIR, file));
+			if (bump) writeFileSync(INDEX_PATH, readFileSync(INDEX_PATH, "utf8").replace(MARKER, (_match, prefix) => `${prefix}${latest}`));
+			console.log(`\nCopied ${updates.length} file(s).${bump ? ` Version marker set to v${latest}.` : ""}`);
+			if (updates.length > 0 || bump) execSync("bun run check", { cwd: ROOT_DIR, stdio: "inherit" });
+		}
+
+		if (merges.length > 0) {
+			keepWorkDir = true;
+			console.log(`\nNeeds a manual merge: ${merges.join(", ")}`);
+			console.log(`  Upstream copies are kept in ${workDir}. Merge each file, for example:`);
+			console.log(`    git merge-file extensions/<file> "${join(workDir, "base")}/<file>" "${join(workDir, "latest")}/<file>"`);
+			console.log(`  then set the "${PACKAGE} (v..." marker in extensions/index.ts to v${latest}.`);
 		}
 	} finally {
-		// Clean up temporary files
-		try {
-			execSync(`node -e 'fs.rmSync(process.argv[1], { recursive: true, force: true })' "${workDir}"`);
-		} catch {
-			// ignore cleanup errors
-		}
+		if (!keepWorkDir) rmSync(workDir, { recursive: true, force: true });
 	}
 }
 
-main().catch(console.error);
+try {
+	main();
+} catch (error) {
+	console.error(`error: ${error instanceof Error ? error.message : String(error)}`);
+	process.exitCode = 1;
+}

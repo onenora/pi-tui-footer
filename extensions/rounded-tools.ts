@@ -14,9 +14,13 @@
  * using warning (yellow) during pending/streaming execution and error (red) on failure.
  */
 
-import type { ExtensionAPI, ToolRenderers } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ThemeColor, ToolRenderers } from "@earendil-works/pi-coding-agent";
 import type { Component, TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
 import { visibleWidth } from "@earendil-works/pi-tui";
+
+type CallRenderer = NonNullable<ToolRenderers["renderCall"]>;
+type Theme = Parameters<CallRenderer>[1];
+type RenderContext = Parameters<CallRenderer>[2];
 
 // ─── Rounded-corner frame ────────────────────────────────────────────────
 //
@@ -27,160 +31,145 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 
 export type FrameMode = "closed" | "open-bottom" | "open-top";
 
+type Role = "call" | "result";
+
+const FRAME_OVERHEAD = 4; // │ + space + content + space + │
+const MIN_FRAMED_WIDTH = FRAME_OVERHEAD + 1; // narrower than this the content has no column: render unframed
+
 // ─── Border color ────────────────────────────────────────────────────────
 
-type RenderContext = { isPartial?: boolean; isError?: boolean };
-
-function borderColorFor(context: RenderContext | undefined): string {
-	if (context?.isError) return "error";
-	if (context?.isPartial) return "warning";
+function borderColorFor(context: Pick<RenderContext, "isError" | "isPartial">): ThemeColor {
+	if (context.isError) return "error";
+	if (context.isPartial) return "warning";
 	return "border";
+}
+
+/** Same check as pi's own Box: an inner component such as bash's Container hands out a fresh array every render. */
+function sameLines(a: readonly string[], b: readonly string[]): boolean {
+	if (a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+	return true;
+}
+
+/**
+ * The call frame and the result frame of one tool row. Each resolves its mode while rendering by
+ * looking at the other, instead of the renderers patching it from outside: pi's HTML export renders
+ * a call and its result separately, and the call has long been drawn when the result arrives.
+ */
+class FrameGroup {
+	call: RoundedFrame | undefined;
+	result: RoundedFrame | undefined;
 }
 
 // ─── RoundedFrame component ─────────────────────────────────────────────
 
 export class RoundedFrame implements Component {
-	private cachedWidth: number | undefined;
-	private cachedInnerLines: string[] | undefined;
-	private cachedLines: string[] | undefined;
+	private cache:
+		| { width: number; mode: FrameMode; colorKey: ThemeColor; inner: string[]; lines: string[] }
+		| undefined;
+	/** Mode of the latest framed render; undefined when the last render was too narrow to frame. */
+	private drawn: FrameMode | undefined;
 
 	constructor(
+		private readonly group: FrameGroup,
+		private readonly role: Role,
 		private inner: Component,
 		private border: (text: string) => string,
-		private mode: FrameMode = "closed",
-		private colorKey: string = "border",
-	) {}
+		private colorKey: ThemeColor,
+	) {
+		group[role] = this;
+	}
 
 	getInner(): Component {
 		return this.inner;
 	}
 
-	getMode(): FrameMode {
-		return this.mode;
-	}
-
-	setMode(mode: FrameMode): void {
-		if (this.mode !== mode) {
-			this.mode = mode;
-			this.invalidate();
-		}
-	}
-
-	update(
-		inner: Component,
-		border: (text: string) => string,
-		mode: FrameMode,
-		colorKey: string,
-	): this {
-		if (this.inner !== inner || this.mode !== mode || this.colorKey !== colorKey) {
-			this.inner = inner;
-			this.mode = mode;
-			this.colorKey = colorKey;
-			this.invalidate();
-		}
+	/** No invalidation needed: the cache is keyed on everything its lines were built from. */
+	update(inner: Component, border: (text: string) => string, colorKey: ThemeColor): this {
+		this.inner = inner;
 		this.border = border;
+		this.colorKey = colorKey;
 		return this;
 	}
 
 	invalidate(): void {
 		this.inner.invalidate?.();
-		this.cachedWidth = undefined;
-		this.cachedInnerLines = undefined;
-		this.cachedLines = undefined;
+		this.cache = undefined;
+	}
+
+	/**
+	 * The call frame stays closed until a result frame exists. The result frame joins it (open-top) only
+	 * if the call frame drew itself open at the bottom, which relies on pi rendering the call component
+	 * before the result component in every pass.
+	 */
+	private resolveMode(): FrameMode {
+		if (this.role === "call") return this.group.result ? "open-bottom" : "closed";
+		return this.group.call?.drawn === "open-bottom" ? "open-top" : "closed";
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
-		if (!this.inner.handleMouse) return undefined;
+		const inner = this.inner;
+		if (!inner.handleMouse) return undefined;
+		if (this.drawn === undefined) return inner.handleMouse(event);
 
-		const width = this.cachedWidth ?? event.width;
-		if (width < 4) {
-			return this.inner.handleMouse(event);
-		}
-
-		const innerWidth = Math.max(1, width - 4);
-		const paddingTop = this.mode !== "open-top" ? 1 : 0;
-		const contentX = event.x - 2;
-		const contentY = event.y - paddingTop;
-		const innerHeight = this.cachedInnerLines?.length ?? 0;
-
-		if (contentX < 0 || contentX >= innerWidth || contentY < 0 || contentY >= innerHeight) {
-			return undefined;
-		}
-
-		return this.inner.handleMouse({
-			...event,
-			x: contentX,
-			y: contentY,
-			width: innerWidth,
-		});
-	}
-
-	setText(text: string): void {
-		(this.inner as any).setText?.(text);
-	}
-
-	clear(): void {
-		(this.inner as any).clear?.();
-	}
-
-	addChild(child: any): void {
-		(this.inner as any).addChild?.(child);
+		const x = event.x - 2;
+		const y = event.y - (this.drawn === "open-top" ? 0 : 1);
+		const width = event.width - FRAME_OVERHEAD;
+		const height = this.cache?.inner.length ?? 0;
+		if (x < 0 || x >= width || y < 0 || y >= height) return undefined;
+		return inner.handleMouse({ ...event, x, y, width, height });
 	}
 
 	render(width: number): string[] {
-		if (width < 4) {
+		if (width < MIN_FRAMED_WIDTH) {
+			this.drawn = undefined;
 			return this.inner.render(width);
 		}
 
-		const innerWidth = Math.max(1, width - 4); // │ + space + content + space + │
+		const innerWidth = width - FRAME_OVERHEAD;
 		const innerLines = this.inner.render(innerWidth);
+		const mode = this.resolveMode();
+		this.drawn = mode;
 
+		const cache = this.cache;
 		if (
-			this.cachedLines &&
-			this.cachedWidth === width &&
-			this.cachedInnerLines === innerLines
+			cache &&
+			cache.width === width &&
+			cache.mode === mode &&
+			cache.colorKey === this.colorKey &&
+			sameLines(cache.inner, innerLines)
 		) {
-			return this.cachedLines;
+			return cache.lines;
 		}
 
 		const horizontal = "─".repeat(width - 2);
 		const side = this.border("│");
+		const left = side + " ";
+		const right = " " + side;
 		const out: string[] = [];
 
-		if (this.mode !== "open-top") {
+		if (mode !== "open-top") {
 			out.push(this.border("╭" + horizontal + "╮"));
 		}
 
 		if (innerLines.length > 0) {
 			for (const line of innerLines) {
 				const pad = " ".repeat(Math.max(0, innerWidth - visibleWidth(line)));
-				out.push(side + " " + line + pad + " " + side);
+				out.push(left + line + pad + right);
 			}
-		} else if (this.mode === "closed") {
+		} else if (mode === "closed") {
 			out.push(side + " ".repeat(width - 2) + side);
 		}
 
-		if (this.mode !== "open-bottom") {
+		if (mode !== "open-bottom") {
 			out.push(this.border("╰" + horizontal + "╯"));
 		}
 
-		this.cachedWidth = width;
-		this.cachedInnerLines = innerLines;
-		this.cachedLines = out;
+		// Keep a copy: the inner component may reuse its array and change it in place.
+		this.cache = { width, mode, colorKey: this.colorKey, inner: innerLines.slice(), lines: out };
 		return out;
 	}
 }
-
-// ─── Frame factories ────────────────────────────────────────────────────
-
-const createFrame = (
-	inner: Component,
-	theme: { fg: (color: string, text: string) => string },
-	mode: FrameMode = "closed",
-	colorKey: string = "border",
-): RoundedFrame => new RoundedFrame(inner, (t) => theme.fg(colorKey, t), mode, colorKey);
-
-const EMPTY_COMPONENT: Component = { render: () => [], invalidate: () => {} };
 
 // ─── Tool wrapping ──────────────────────────────────────────────────────
 
@@ -198,8 +187,29 @@ const ROUNDED_TOOL_NAMES: ReadonlySet<string> = new Set([
 	"fff-multi-grep",
 ]);
 
-function unwrapInner(component: unknown): Component | undefined {
-	return component instanceof RoundedFrame ? component.getInner() : (component as Component | undefined);
+// Keyed by the row's renderer state, so nothing is written into the state the tool itself uses.
+const GROUPS = new WeakMap<object, FrameGroup>();
+
+function groupOf(state: object | undefined): FrameGroup {
+	if (!state) return new FrameGroup();
+	let group = GROUPS.get(state);
+	if (!group) GROUPS.set(state, (group = new FrameGroup()));
+	return group;
+}
+
+/** Hand the tool its own previous component back, not the frame around it. */
+function unframed(context: RenderContext): RenderContext {
+	const last = context.lastComponent;
+	return last instanceof RoundedFrame ? { ...context, lastComponent: last.getInner() } : context;
+}
+
+function frameFor(role: Role, inner: Component, theme: Theme, context: RenderContext): RoundedFrame {
+	const colorKey = borderColorFor(context);
+	const border = (text: string) => theme.fg(colorKey, text);
+	const last = context.lastComponent;
+	return last instanceof RoundedFrame
+		? last.update(inner, border, colorKey)
+		: new RoundedFrame(groupOf(context.state), role, inner, border, colorKey);
 }
 
 export function wrapRenderers(def: ToolRenderers): ToolRenderers {
@@ -208,56 +218,19 @@ export function wrapRenderers(def: ToolRenderers): ToolRenderers {
 		return def;
 	}
 
+	const { renderCall, renderResult } = def;
 	return {
 		...def,
-		renderShell: "self" as const,
-		renderCall: (args: any, theme: any, context: any) => {
-			const unwrapped = unwrapInner(context?.lastComponent);
-			const inner: Component = def.renderCall
-				? def.renderCall(args, theme, { ...context, lastComponent: unwrapped })
-				: EMPTY_COMPONENT;
-
-			// If the tool is still pending/streaming and no result has arrived yet,
-			// close the bottom border so it renders as a complete box instead of an open frame.
-			const isPendingWithoutResult = Boolean(context?.isPartial && !context?.state?.__hasResult);
-			const mode: FrameMode = def.renderResult && !isPendingWithoutResult ? "open-bottom" : "closed";
-			const colorKey = borderColorFor(context);
-			const borderFn = (t: string) => theme.fg(colorKey, t);
-
-			let callFrame: RoundedFrame;
-			if (context?.lastComponent instanceof RoundedFrame) {
-				callFrame = context.lastComponent.update(inner, borderFn, mode, colorKey);
-			} else {
-				callFrame = createFrame(inner, theme, mode, colorKey);
-			}
-
-			if (context?.state) {
-				context.state.__callFrame = callFrame;
-			}
-			return callFrame;
-		},
-		renderResult: (result: any, options: any, theme: any, context: any) => {
-			if (context?.state) {
-				context.state.__hasResult = true;
-				// Connect seamlessly with the call frame by opening its bottom border.
-				const callFrame = context.state.__callFrame;
-				if (callFrame instanceof RoundedFrame && callFrame.getMode() !== "open-bottom") {
-					callFrame.setMode("open-bottom");
-				}
-			}
-
-			const unwrapped = unwrapInner(context?.lastComponent);
-			const inner: Component = def.renderResult
-				? def.renderResult(result, options, theme, { ...context, lastComponent: unwrapped })
-				: EMPTY_COMPONENT;
-			const colorKey = borderColorFor(context);
-			const borderFn = (t: string) => theme.fg(colorKey, t);
-
-			if (context?.lastComponent instanceof RoundedFrame) {
-				return context.lastComponent.update(inner, borderFn, "open-top", colorKey);
-			}
-			return createFrame(inner, theme, "open-top", colorKey);
-		},
+		renderShell: "self",
+		// A part the tool does not define stays undefined, so pi draws its own fallback for it
+		// (unframed) instead of an empty frame swallowing the call or the result text.
+		renderCall:
+			renderCall &&
+			((args, theme, context) => frameFor("call", renderCall(args, theme, unframed(context)), theme, context)),
+		renderResult:
+			renderResult &&
+			((result, options, theme, context) =>
+				frameFor("result", renderResult(result, options, theme, unframed(context)), theme, context)),
 	};
 }
 
