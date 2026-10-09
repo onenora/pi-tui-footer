@@ -2,13 +2,13 @@
  * Rounded tool frames — rounded frames for tool calls and results.
  *
  * Uses `pi.registerToolRenderer()` to wrap the renderers of built-in tools
- * (read, write, bash, powershell, grep, find, ls, plus pi-fff's ffgrep, fffind,
+ * (read, write, edit, bash, powershell, grep, find, ls, plus pi-fff's ffgrep, fffind,
  * fff-multi-grep) with `renderShell: "self"`
  * and a frame drawn with Unicode rounded-corner characters (╭ ╮ ╰ ╯ ─ │).
  * Tool definitions, execution and active-tool state are left untouched.
  *
- * Tools that already render their own shell (e.g. `edit`) are preserved as-is
- * to avoid duplicate nesting and UI glitches.
+ * A tool that draws its own shell as a background `Box` (e.g. `edit`) has the Box's
+ * background and vertical padding dropped, so only its content sits in the frame.
  *
  * Border color follows `theme.fg("border", ...)` so it adapts to your theme,
  * using warning (yellow) during pending/streaming execution and error (red) on failure.
@@ -16,7 +16,7 @@
 
 import type { ExtensionAPI, ThemeColor, ToolRenderers } from "@earendil-works/pi-coding-agent";
 import type { Component, TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { Box, Container, visibleWidth } from "@earendil-works/pi-tui";
 
 type CallRenderer = NonNullable<ToolRenderers["renderCall"]>;
 type Theme = Parameters<CallRenderer>[1];
@@ -59,6 +59,31 @@ function sameLines(a: readonly string[], b: readonly string[]): boolean {
 class FrameGroup {
 	call: RoundedFrame | undefined;
 	result: RoundedFrame | undefined;
+}
+
+/**
+ * The children of a tool's shell Box without its background and vertical padding. Reads them on every
+ * pass: edit rebuilds its call Box in place, also from its result renderer.
+ */
+class BoxContent extends Container {
+	constructor(readonly box: Box) {
+		super();
+	}
+
+	override invalidate(): void {
+		this.children = this.box.children;
+		super.invalidate();
+	}
+
+	override handleMouse(event: TuiMouseEvent) {
+		this.children = this.box.children;
+		return super.handleMouse(event);
+	}
+
+	override render(width: number): string[] {
+		this.children = this.box.children;
+		return super.render(width);
+	}
 }
 
 // ─── RoundedFrame component ─────────────────────────────────────────────
@@ -176,6 +201,7 @@ export class RoundedFrame implements Component {
 const ROUNDED_TOOL_NAMES: ReadonlySet<string> = new Set([
 	"read",
 	"write",
+	"edit",
 	"bash",
 	"powershell",
 	"grep",
@@ -197,13 +223,19 @@ function groupOf(state: object | undefined): FrameGroup {
 	return group;
 }
 
-/** Hand the tool its own previous component back, not the frame around it. */
-function unframed(context: RenderContext): RenderContext {
+/**
+ * Hand the tool its own previous component back, not the frame around it. The frame already pads its
+ * content, so self-shell tools must not add outputPad on top.
+ */
+function innerContext(context: RenderContext): RenderContext {
 	const last = context.lastComponent;
-	return last instanceof RoundedFrame ? { ...context, lastComponent: last.getInner() } : context;
+	let inner = last instanceof RoundedFrame ? last.getInner() : last;
+	if (inner instanceof BoxContent) inner = inner.box;
+	return { ...context, lastComponent: inner, outputPad: 0 };
 }
 
-function frameFor(role: Role, inner: Component, theme: Theme, context: RenderContext): RoundedFrame {
+function frameFor(role: Role, rendered: Component, theme: Theme, context: RenderContext): RoundedFrame {
+	const inner = rendered instanceof Box ? new BoxContent(rendered) : rendered;
 	const colorKey = borderColorFor(context);
 	const border = (text: string) => theme.fg(colorKey, text);
 	const last = context.lastComponent;
@@ -213,11 +245,6 @@ function frameFor(role: Role, inner: Component, theme: Theme, context: RenderCon
 }
 
 export function wrapRenderers(def: ToolRenderers): ToolRenderers {
-	// Tools that already manage their own shell (e.g. edit) should remain untouched.
-	if (def.renderShell === "self") {
-		return def;
-	}
-
 	const { renderCall, renderResult } = def;
 	return {
 		...def,
@@ -226,11 +253,11 @@ export function wrapRenderers(def: ToolRenderers): ToolRenderers {
 		// (unframed) instead of an empty frame swallowing the call or the result text.
 		renderCall:
 			renderCall &&
-			((args, theme, context) => frameFor("call", renderCall(args, theme, unframed(context)), theme, context)),
+			((args, theme, context) => frameFor("call", renderCall(args, theme, innerContext(context)), theme, context)),
 		renderResult:
 			renderResult &&
 			((result, options, theme, context) =>
-				frameFor("result", renderResult(result, options, theme, unframed(context)), theme, context)),
+				frameFor("result", renderResult(result, options, theme, innerContext(context)), theme, context)),
 	};
 }
 
