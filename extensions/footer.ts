@@ -35,10 +35,10 @@ function renderBar(theme: Theme, pct: number, barWidth: number, ascii: boolean):
 	const filled = Math.max(0, Math.min(barWidth, Math.round((pct / 100) * barWidth)));
 	const empty = barWidth - filled;
 	const color = stressColor(pct);
-	// Use half-height parallelogram blocks (▰/▱) instead of full-height
+	// Use small centered square blocks (▪/▫) instead of full-height
 	// █/░ so the bar's visual height matches the surrounding [ ] brackets.
-	const filledCell = ascii ? "#" : "▰";
-	const emptyCell = ascii ? "-" : "▱";
+	const filledCell = ascii ? "#" : "▪";
+	const emptyCell = ascii ? "-" : "▫";
 	return (
 		theme.fg("dim", "[") +
 		theme.fg(color, filledCell.repeat(filled)) +
