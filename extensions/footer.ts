@@ -31,6 +31,15 @@ export function shortHostname(hostname: string): string {
 	return hostname.split(".")[0] ?? "";
 }
 
+// Kitty can use the blank cell after a wide Nerd icon to render the glyph.
+// With footerSegments.nerdIconSpacing, reserve an extra cell before fitting
+// footer segments. Keep Unicode/ASCII and Git flags compact.
+function spaceFooterIcon(glyph: string): string {
+	return /[\uE000-\uF8FF\u{F0000}-\u{FFFFD}\u{100000}-\u{10FFFD}]/u.test(glyph)
+		? `${glyph} `
+		: glyph;
+}
+
 function renderBar(theme: Theme, pct: number, barWidth: number, ascii: boolean): string {
 	const filled = Math.max(0, Math.min(barWidth, Math.round((pct / 100) * barWidth)));
 	const empty = barWidth - filled;
@@ -114,9 +123,11 @@ function renderRuntimeSegment(
 	theme: Theme,
 	runtime: RuntimeInfo | null,
 	iconMode: OpenTuiConfig["icons"]["mode"],
+	spaceIcon: boolean,
 ): string {
 	if (!runtime) return "";
-	const symbol = theme.fg("success", runtimeSymbol(runtime.name, iconMode));
+	const glyph = runtimeSymbol(runtime.name, iconMode);
+	const symbol = theme.fg("success", spaceIcon ? spaceFooterIcon(glyph) : glyph);
 	const version = runtime.version ? theme.fg("muted", runtime.version) : "";
 	const label = [symbol, version].filter(Boolean).join(" ");
 	return label;
@@ -288,8 +299,13 @@ function renderFooterContent(
 
 	const state = getState();
 	const config = getConfig();
-	const glyphs = resolveGlyphs(config.icons.mode);
 	const segments = config.footerSegments;
+	const glyphs = { ...resolveGlyphs(config.icons.mode) };
+	if (segments.nerdIconSpacing) {
+		for (const key of Object.keys(glyphs) as (keyof IconGlyphs)[]) {
+			glyphs[key] = spaceFooterIcon(glyphs[key]);
+		}
+	}
 	const meta = getModelMeta();
 	const totals = getUsageTotals(ctx);
 
@@ -342,7 +358,7 @@ function renderFooterContent(
 		inlineTopLeftParts.push(leftParts.at(-1)!);
 	}
 	if (segments.runtime) {
-		const runtimeSeg = renderRuntimeSegment(theme, state.runtime, config.icons.mode);
+		const runtimeSeg = renderRuntimeSegment(theme, state.runtime, config.icons.mode, segments.nerdIconSpacing);
 		if (runtimeSeg) {
 			leftParts.push({ text: runtimeSeg, priority: 4 });
 			inlineTopRightParts.push(leftParts.at(-1)!);

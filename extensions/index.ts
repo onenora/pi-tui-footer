@@ -4,7 +4,7 @@
  * thinking peek preview, rounded tool frames, and turn telemetry.
  *
  * Integrated from:
- *   - pi-open-tui (v0.3.11, MIT, by OldSun, https://github.com/OldSuns/pi-open-tui)
+ *   - pi-open-tui (v0.3.12, MIT, by OldSun, https://github.com/OldSuns/pi-open-tui)
  *   - pi-rounded-tools (v0.1.3, MIT, by OrionPax, https://github.com/orionpax1997/pi-rounded-tools)
  *
  * Security audit notes:
@@ -197,7 +197,8 @@ export default function (pi: ExtensionAPI) {
 	const scheduleGitRefresh = async (ctx: ExtensionContext) => {
 		if (!sessionLifecycle.isCurrent()) return;
 		const segs = config.footerSegments;
-		if (!segs.gitBranch && !segs.gitStatus && !segs.gitCommit) {
+		// gitCommit only appends a tag to the gitBranch segment, so it never needs git on its own.
+		if (!segs.gitBranch && !segs.gitStatus) {
 			state.git = emptyGitStatus();
 			requestFooterRender?.();
 			return;
@@ -205,8 +206,8 @@ export default function (pi: ExtensionAPI) {
 		const generation = sessionLifecycle.currentGeneration();
 		const cwd = ctx.cwd;
 		const git = await readGitStatus(cwd, {
-			readCommit: true,
-			readTag: segs.gitCommit,
+			readCommit: segs.gitBranch,
+			readTag: segs.gitBranch && segs.gitCommit,
 			readCounts: segs.gitStatus,
 		});
 		if (!sessionLifecycle.isCurrent(generation)) return;
@@ -435,7 +436,7 @@ export default function (pi: ExtensionAPI) {
 			if (wasRoundedTools !== newConfig.roundedTools || wasEnabled !== newConfig.enabled) {
 				applyRoundedTools();
 			}
-			const gitNeeded = newConfig.footerSegments.gitBranch || newConfig.footerSegments.gitStatus || newConfig.footerSegments.gitCommit;
+			const gitNeeded = newConfig.footerSegments.gitBranch || newConfig.footerSegments.gitStatus;
 			if (lastCtx && gitNeeded) {
 				void scheduleGitRefresh(lastCtx);
 			} else {

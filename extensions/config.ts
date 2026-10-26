@@ -22,6 +22,7 @@ export interface FooterSegments {
 	cost: boolean;
 	extensionStatuses: boolean;
 	capitalizeProviderName: boolean;
+	nerdIconSpacing: boolean;
 }
 
 export interface TelemetryConfig {
@@ -74,6 +75,7 @@ export const DEFAULT_CONFIG: OpenTuiConfig = {
 		cost: true,
 		extensionStatuses: true,
 		capitalizeProviderName: true,
+		nerdIconSpacing: false,
 	},
 	telemetry: {
 		enabled: true,
@@ -96,6 +98,18 @@ export function getConfigPath(): string {
 
 function normalizeThinkingPeekLines(value: unknown): ThinkingPeekLines {
 	return value === 0 || value === 1 || value === 2 ? value : DEFAULT_CONFIG.thinkingPeek.lines;
+}
+
+const ICON_MODES: IconMode[] = ["auto", "nerd", "unicode", "ascii"];
+
+// Non-boolean flags (e.g. "false" strings) fall back to defaults instead of reading as truthy.
+function normalizeFlags<T extends object>(value: unknown, defaults: T): T {
+	const source = typeof value === "object" && value !== null && !Array.isArray(value) ? value : {};
+	const result: Record<string, unknown> = { ...source };
+	for (const [key, fallback] of Object.entries(defaults)) {
+		if (typeof result[key] !== "boolean") result[key] = fallback;
+	}
+	return result as T;
 }
 
 function deepMerge<T>(base: T, override: unknown): T {
@@ -143,11 +157,19 @@ export function loadConfig(notify?: (msg: string, level: "warning" | "info") => 
 		const raw = readFileSync(path, "utf8");
 		const parsed: unknown = JSON.parse(raw);
 		const config = deepMerge(DEFAULT_CONFIG, parsed);
+		if (typeof config.enabled !== "boolean") {
+			config.enabled = DEFAULT_CONFIG.enabled;
+		}
 		if (typeof config.inlineFooter !== "boolean") {
 			config.inlineFooter = DEFAULT_CONFIG.inlineFooter;
 		}
 		if (typeof config.roundedTools !== "boolean") {
 			config.roundedTools = DEFAULT_CONFIG.roundedTools;
+		}
+		config.footerSegments = normalizeFlags(config.footerSegments, DEFAULT_CONFIG.footerSegments);
+		config.telemetry = normalizeFlags(config.telemetry, DEFAULT_CONFIG.telemetry);
+		if (typeof config.icons !== "object" || config.icons === null || !ICON_MODES.includes(config.icons.mode)) {
+			config.icons = structuredClone(DEFAULT_CONFIG.icons);
 		}
 		if (config.settingsLanguage !== "en" && config.settingsLanguage !== "zh") {
 			config.settingsLanguage = DEFAULT_CONFIG.settingsLanguage;
