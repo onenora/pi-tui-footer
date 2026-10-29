@@ -4,7 +4,7 @@
  * thinking peek preview, rounded tool frames, and turn telemetry.
  *
  * Integrated from:
- *   - pi-open-tui (v0.3.12, MIT, by OldSun, https://github.com/OldSuns/pi-open-tui)
+ *   - pi-open-tui (v0.3.13, MIT, by OldSun, https://github.com/OldSuns/pi-open-tui)
  *   - pi-rounded-tools (v0.1.3, MIT, by OrionPax, https://github.com/orionpax1997/pi-rounded-tools)
  *
  * Security audit notes:
@@ -161,6 +161,7 @@ export default function (pi: ExtensionAPI) {
 					scheduleGitRefresh: () => {
 						void scheduleGitRefresh(ctx);
 					},
+					getLiveTps: () => turnTelemetry.getLiveTps(),
 				},
 			);
 			cleanupFooter = footer.cleanup;
