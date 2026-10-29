@@ -63,12 +63,14 @@ function latestVersion(): string {
 	try {
 		out = execSync(`npm view ${PACKAGE} version`, {
 			encoding: "utf8",
-			stdio: ["ignore", "pipe", "ignore"],
+			stdio: ["ignore", "pipe", "pipe"],
 		}).trim();
-	} catch {
-		// Handled below
+	} catch (error) {
+		// Surface npm's own reason (offline, cache permissions, ...) instead of a generic message
+		const stderr = String((error as { stderr?: unknown }).stderr ?? "").trim();
+		fail(`cannot read latest version from npm registry${stderr ? `\n${stderr}` : ""}`);
 	}
-	return /^\d+\.\d+\.\d+$/.test(out) ? out : fail("cannot read latest version from npm registry");
+	return /^\d+\.\d+\.\d+$/.test(out) ? out : fail(`unexpected npm version output: ${JSON.stringify(out)}`);
 }
 
 function isNewer(a: string, b: string): boolean {

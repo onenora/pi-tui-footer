@@ -394,28 +394,28 @@ export function registerSettingsCommand(
 ): void {
 	pi.registerCommand("pi-tui", {
 		description: "Open the Pi TUI settings UI",
-		handler: async (_args: string, ctx: ExtensionContext) => {
+		handler: async (_args, ctx: ExtensionContext) => {
 			if (!ctx.hasUI) return;
-			await ctx.ui.custom<void>((tui: TUI, theme, _kb, done) => {
-				const ui = new SettingsUi(
-					theme,
-					hooks.getConfig(),
-					(config) => hooks.onConfigChanged(config),
-					() => done(undefined),
-				);
-				return {
-					render: (w: number) => ui.render(w),
-					invalidate: () => ui.invalidate(),
-					handleInput: (data: string) => {
-						ui.handleInput(data);
-						tui.requestRender();
-					},
-				};
-			}, { overlay: true });
-			// Overlay is closed and focus is back on the editor. Deferred UI changes
-			// (e.g. toggling the extension) run here, so pi core's focus restore
-			// cannot strand the overlay without keyboard input.
-			hooks.onOverlayClosed?.();
+		await ctx.ui.custom<void>((tui: TUI, theme, _kb, done) => {
+			const ui = new SettingsUi(
+				theme,
+				hooks.getConfig(),
+				(config) => hooks.onConfigChanged(config),
+				() => done(undefined),
+			);
+			return {
+				render: (w: number) => ui.render(w),
+				invalidate: () => ui.invalidate(),
+				handleInput: (data: string) => {
+					ui.handleInput(data);
+					tui.requestRender();
+				},
+			};
+		}, { overlay: true });
+		// Overlay is closed and focus is back on the editor. Deferred UI changes
+		// (e.g. toggling the extension) run here, so pi core's focus restore
+		// cannot strand the overlay without keyboard input.
+		hooks.onOverlayClosed?.();
 		},
 	});
 }

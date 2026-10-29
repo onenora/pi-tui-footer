@@ -141,7 +141,6 @@ export default function (pi: ExtensionAPI) {
 			peekSettleTimer = undefined;
 		}
 	};
-
 	const applyUi = (ctx: ExtensionContext) => {
 		if (!isTuiContext(ctx)) return;
 		if (!config.enabled) {
@@ -415,8 +414,6 @@ export default function (pi: ExtensionAPI) {
 	registerSettingsCommand(pi, {
 		getConfig: () => config,
 		onConfigChanged: (newConfig) => {
-			const wasEnabled = config.enabled;
-			const wasRoundedTools = config.roundedTools;
 			const cursorStyleChanged = config.cursorStyle !== newConfig.cursorStyle;
 			const thinkingPeekLinesChanged = config.thinkingPeek.lines !== newConfig.thinkingPeek.lines;
 			saveConfig(newConfig);
@@ -433,9 +430,7 @@ export default function (pi: ExtensionAPI) {
 			if (lastCtx) {
 				pendingUiChange = getPendingUiChange(newConfig.enabled, active);
 			}
-			if (wasRoundedTools !== newConfig.roundedTools || wasEnabled !== newConfig.enabled) {
-				applyRoundedTools();
-			}
+			applyRoundedTools();
 			const gitNeeded = newConfig.footerSegments.gitBranch || newConfig.footerSegments.gitStatus;
 			if (lastCtx && gitNeeded) {
 				void scheduleGitRefresh(lastCtx);
