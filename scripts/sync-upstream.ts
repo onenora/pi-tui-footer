@@ -16,7 +16,7 @@
  * are kept for `git merge-file`.
  */
 
-import { execSync, spawnSync } from "node:child_process";
+import { execFileSync, execSync, spawnSync } from "node:child_process";
 import {
 	copyFileSync,
 	existsSync,
@@ -44,6 +44,7 @@ const INTENTIONAL_CUSTOMIZATIONS: Record<string, string> = {
 	"config.ts": "config file pi-tui.json & roundedTools option",
 	"settings-command.ts": "/pi-tui command & roundedTools toggle",
 	"index.ts": "roundedTools manager wiring & banner",
+	"runtime.ts": "node version via `-p process.version` (works when node is bun)",
 };
 
 /** Files that exist only in this repo and have no upstream counterpart. */
@@ -58,19 +59,23 @@ function integratedVersion(): string {
 	return MARKER.exec(content)?.[2] ?? fail(`no "${PACKAGE} (vX.Y.Z" marker in extensions/index.ts`);
 }
 
-function latestVersion(): string {
-	let out = "";
+/** Read a package metadata field from the npm registry via `bun info` (honors bunfig/.npmrc registry). */
+function registryField(spec: string, field: string): string {
 	try {
-		out = execSync(`npm view ${PACKAGE} version`, {
+		return execFileSync("bun", ["info", spec, field], {
 			encoding: "utf8",
 			stdio: ["ignore", "pipe", "pipe"],
 		}).trim();
 	} catch (error) {
-		// Surface npm's own reason (offline, cache permissions, ...) instead of a generic message
+		// Surface bun's own reason (offline, unknown version, ...) instead of a generic message
 		const stderr = String((error as { stderr?: unknown }).stderr ?? "").trim();
-		fail(`cannot read latest version from npm registry${stderr ? `\n${stderr}` : ""}`);
+		fail(`cannot read ${field} of ${spec} from npm registry${stderr ? `\n${stderr}` : ""}`);
 	}
-	return /^\d+\.\d+\.\d+$/.test(out) ? out : fail(`unexpected npm version output: ${JSON.stringify(out)}`);
+}
+
+function latestVersion(): string {
+	const out = registryField(PACKAGE, "version");
+	return /^\d+\.\d+\.\d+$/.test(out) ? out : fail(`unexpected version output: ${JSON.stringify(out)}`);
 }
 
 function isNewer(a: string, b: string): boolean {
@@ -91,11 +96,13 @@ const read = (path: string): string | undefined =>
 function fetchUpstream(version: string, label: string, workDir: string): string {
 	const pack = join(workDir, `${label}.pack`);
 	mkdirSync(pack, { recursive: true });
-	execSync(`npm pack ${PACKAGE}@${version} --pack-destination "${pack}" --quiet`, {
-		stdio: ["ignore", "ignore", "inherit"],
-	});
-	const tgz = readdirSync(pack).find((f) => f.endsWith(".tgz")) ?? fail(`could not download ${PACKAGE}@${version}`);
-	execSync(`tar -xzf "${join(pack, tgz)}" -C "${pack}"`);
+	const spec = `${PACKAGE}@${version}`;
+	const url = registryField(spec, "dist.tarball");
+	if (!/^https?:\/\/\S+$/.test(url)) fail(`unexpected tarball url for ${spec}: ${JSON.stringify(url)}`);
+	const tgz = join(pack, "package.tgz");
+	const res = spawnSync("curl", ["-fsSL", url, "-o", tgz], { stdio: ["ignore", "ignore", "inherit"] });
+	if (res.error || res.status !== 0) fail(`could not download ${spec}: ${res.error?.message ?? `curl exited ${res.status}`}`);
+	execSync(`tar -xzf "${tgz}" -C "${pack}"`);
 	const source = join(pack, "package", "extensions", "open-tui");
 	if (!existsSync(source)) fail(`${PACKAGE}@${version} missing extensions/open-tui directory`);
 	const dest = join(workDir, label);
