@@ -28,9 +28,11 @@ const COPY = {
 		hint: "Tab/Shift+Tab/←/→: tabs · ↑/↓: move · Enter/Space: change · Esc/q: close",
 		labels: {
 			enabled: "Enabled",
+			header: "Override header",
 			roundedTools: "Rounded tool frames",
 			inlineFooter: "Footer in editor border",
 			thinkingPeek: "Thinking peek",
+			toolView: "Tool view",
 			language: "Language",
 			cursorStyle: "Cursor style",
 			iconMode: "Icon mode",
@@ -57,6 +59,7 @@ const COPY = {
 			on: "On",
 			off: "Off",
 			thinkingPeek: { off: "Off", one: "1 line", two: "2 lines" },
+			toolView: { native: "Native", compact: "Compact" },
 			languages: { en: "English", zh: "简体中文" },
 			cursorStyles: { block: "Block", bar: "Bar", underline: "Underline" },
 			icons: { auto: "Auto", nerd: "Nerd", unicode: "Unicode", ascii: "ASCII" },
@@ -68,9 +71,11 @@ const COPY = {
 		hint: "Tab/Shift+Tab/←/→：切页 · ↑/↓：移动 · Enter/Space：更改 · Esc/q：关闭",
 		labels: {
 			enabled: "启用",
+			header: "覆盖顶部信息栏",
 			roundedTools: "圆角工具边框",
 			inlineFooter: "底栏嵌入输入框",
 			thinkingPeek: "思考预览",
+			toolView: "工具视图",
 			language: "语言",
 			cursorStyle: "光标样式",
 			iconMode: "图标模式",
@@ -97,6 +102,7 @@ const COPY = {
 			on: "开启",
 			off: "关闭",
 			thinkingPeek: { off: "关闭", one: "单行", two: "双行" },
+			toolView: { native: "原生", compact: "紧凑" },
 			languages: { en: "English", zh: "简体中文" },
 			cursorStyles: { block: "块", bar: "竖线", underline: "下划线" },
 			icons: { auto: "自动", nerd: "Nerd", unicode: "Unicode", ascii: "ASCII" },
@@ -162,10 +168,12 @@ function buildFeaturesItems(config: OpenTuiConfig, copy: SettingsCopy): SettingI
 	const flag = (value: boolean) => value ? copy.values.on : copy.values.off;
 	return [
 		{ id: "enabled", label: copy.labels.enabled, currentValue: flag(config.enabled) },
+		{ id: "header", label: copy.labels.header, currentValue: flag(config.header) },
 		{ id: "roundedTools", label: copy.labels.roundedTools, currentValue: flag(config.roundedTools) },
 		{ id: "settingsLanguage", label: copy.labels.language, currentValue: copy.values.languages[config.settingsLanguage] },
 		{ id: "thinkingPeek", label: copy.labels.thinkingPeek, currentValue: formatThinkingPeekLines(config.thinkingPeek.lines, copy) },
 		{ id: "inlineFooter", label: copy.labels.inlineFooter, currentValue: flag(config.inlineFooter) },
+		{ id: "toolView", label: copy.labels.toolView, currentValue: copy.values.toolView[config.toolView.mode] },
 	];
 }
 
@@ -228,10 +236,14 @@ function handleSettingChange(
 ): OpenTuiConfig {
 	if (tab === "features") {
 		if (itemId === "enabled") return toggleEnabled(config);
+		if (itemId === "header") return { ...config, header: !config.header };
 		if (itemId === "roundedTools") return { ...config, roundedTools: !config.roundedTools };
 		if (itemId === "inlineFooter") return { ...config, inlineFooter: !config.inlineFooter };
 		if (itemId === "settingsLanguage") return toggleLanguage(config);
 		if (itemId === "thinkingPeek") return cycleThinkingPeek(config);
+		if (itemId === "toolView") {
+			return { ...config, toolView: { mode: config.toolView.mode === "native" ? "compact" : "native" } };
+		}
 	}
 	if (tab === "icons") {
 		if (itemId === "mode") return cycleIconMode(config);

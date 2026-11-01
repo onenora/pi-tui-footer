@@ -4,7 +4,7 @@
  * thinking peek preview, rounded tool frames, and turn telemetry.
  *
  * Integrated from:
- *   - pi-open-tui (v0.3.14, MIT, by OldSun, https://github.com/OldSuns/pi-open-tui)
+ *   - pi-open-tui (v0.4.0, MIT, by OldSun, https://github.com/OldSuns/pi-open-tui)
  *   - pi-rounded-tools (v0.1.3, MIT, by OrionPax, https://github.com/orionpax1997/pi-rounded-tools)
  *
  * Security audit notes:
@@ -25,6 +25,7 @@ import { RoundedToolsManager } from "./rounded-tools.ts";
 import { SessionLifecycle } from "./session-lifecycle.ts";
 import { registerSettingsCommand } from "./settings-command.ts";
 import { formatTurnTelemetry, TurnTelemetryTracker } from "./telemetry.ts";
+import { registerToolView } from "./tool-view.ts";
 import {
 	createInitialState,
 	getModelMeta,
@@ -63,6 +64,7 @@ export default function (pi: ExtensionAPI) {
 	const roundedTools = new RoundedToolsManager(pi);
 
 	let config: OpenTuiConfig = structuredClone(DEFAULT_CONFIG);
+	let configLoaded = false;
 	let active = false;
 	let lastCtx: ExtensionContext | undefined;
 	let requestFooterRender: (() => void) | undefined;
@@ -132,7 +134,8 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		if (!active) {
-			cleanupHeader = installHeader(pi, ctx);
+			// Leave the header slot alone when disabled so another extension's header survives.
+			if (config.header) cleanupHeader = installHeader(pi, ctx);
 			const footer = installFooter(
 				ctx,
 				() => state,
@@ -210,7 +213,8 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	const applyRoundedTools = () => {
-		roundedTools.setEnabled(config.enabled && config.roundedTools);
+		// Resolvers chain in registration order, so frames would wrap the compact tool view; yield to it.
+		roundedTools.setEnabled(config.enabled && config.roundedTools && config.toolView.mode === "native");
 	};
 
 	// The renderer resolver is installed when RoundedToolsManager is constructed
@@ -218,6 +222,7 @@ export default function (pi: ExtensionAPI) {
 	// Toggling the setting affects components created afterwards; already-rendered
 	// historical components keep their frames until the next transcript rebuild.
 	config = loadConfig();
+	configLoaded = true;
 	applyRoundedTools();
 
 	const refreshInteractiveState = (ctx: ExtensionContext, project = false) => {
@@ -257,6 +262,7 @@ export default function (pi: ExtensionAPI) {
 
 		ensureConfigExists();
 		config = loadConfig((msg, level) => ctx.ui.notify(msg, level));
+		configLoaded = true;
 		clearPeekLabel(ctx);
 
 		applyUi(ctx);
@@ -396,10 +402,26 @@ export default function (pi: ExtensionAPI) {
 		refreshInteractiveState(ctx);
 	});
 
+	if (typeof pi.registerToolRenderer === "function") {
+		registerToolView(
+			pi,
+			() => {
+				// Resumed sessions rebuild their rows before session_start fires, so read the file once here.
+				if (!configLoaded) {
+					config = loadConfig();
+					configLoaded = true;
+				}
+				return config.enabled ? config.toolView.mode : "native";
+			},
+			() => resolveGlyphs(config.icons.mode),
+		);
+	}
+
 	registerSettingsCommand(pi, {
 		getConfig: () => config,
 		onConfigChanged: (newConfig) => {
 			const cursorStyleChanged = config.cursorStyle !== newConfig.cursorStyle;
+			const headerChanged = config.header !== newConfig.header;
 			const thinkingPeekLinesChanged = config.thinkingPeek.lines !== newConfig.thinkingPeek.lines;
 			saveConfig(newConfig);
 			config = newConfig;
@@ -411,6 +433,10 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (cursorStyleChanged && active && editor) {
 				editor.setCursorStyle(newConfig.cursorStyle);
+			}
+			if (headerChanged && active && lastCtx) {
+				cleanupHeader?.();
+				cleanupHeader = newConfig.header ? installHeader(pi, lastCtx) : undefined;
 			}
 			if (lastCtx) {
 				pendingUiChange = getPendingUiChange(newConfig.enabled, active);

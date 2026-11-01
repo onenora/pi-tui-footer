@@ -6,6 +6,7 @@ import type { IconMode } from "./icons.ts";
 export type SettingsLanguage = "en" | "zh";
 export type CursorStyle = "block" | "bar" | "underline";
 export type ThinkingPeekLines = 0 | 1 | 2;
+export type ToolViewMode = "native" | "compact";
 
 export type { IconMode } from "./icons.ts";
 
@@ -42,6 +43,8 @@ export interface ThinkingPeekConfig {
 
 export interface OpenTuiConfig {
 	enabled: boolean;
+	/** Override Pi's header with the open-tui header. When false, the header slot is left to Pi or another extension. */
+	header: boolean;
 	roundedTools: boolean;
 	inlineFooter: boolean;
 	settingsLanguage: SettingsLanguage;
@@ -52,10 +55,14 @@ export interface OpenTuiConfig {
 	footerSegments: FooterSegments;
 	telemetry: TelemetryConfig;
 	thinkingPeek: ThinkingPeekConfig;
+	toolView: {
+		mode: ToolViewMode;
+	};
 }
 
 export const DEFAULT_CONFIG: OpenTuiConfig = {
 	enabled: true,
+	header: true,
 	roundedTools: true,
 	inlineFooter: false,
 	settingsLanguage: "en",
@@ -90,6 +97,9 @@ export const DEFAULT_CONFIG: OpenTuiConfig = {
 	},
 	thinkingPeek: {
 		lines: 1,
+	},
+	toolView: {
+		mode: "native",
 	},
 };
 
@@ -162,6 +172,9 @@ export function loadConfig(notify?: (msg: string, level: "warning" | "info") => 
 		if (typeof config.enabled !== "boolean") {
 			config.enabled = DEFAULT_CONFIG.enabled;
 		}
+		if (typeof config.header !== "boolean") {
+			config.header = DEFAULT_CONFIG.header;
+		}
 		if (typeof config.inlineFooter !== "boolean") {
 			config.inlineFooter = DEFAULT_CONFIG.inlineFooter;
 		}
@@ -183,6 +196,10 @@ export function loadConfig(notify?: (msg: string, level: "warning" | "info") => 
 			config.thinkingPeek = structuredClone(DEFAULT_CONFIG.thinkingPeek);
 		} else {
 			config.thinkingPeek.lines = normalizeThinkingPeekLines(config.thinkingPeek.lines);
+		}
+		if (typeof config.toolView !== "object" || config.toolView === null
+			|| (config.toolView.mode !== "native" && config.toolView.mode !== "compact")) {
+			config.toolView = structuredClone(DEFAULT_CONFIG.toolView);
 		}
 		return config;
 	} catch (err) {
