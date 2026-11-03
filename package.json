@@ -1,6 +1,6 @@
 {
 	"name": "pi-tui-footer",
-	"version": "2.0.0",
+	"version": "2.0.1",
 	"description": "Header, status footer, rounded editor and background-free rounded tool frames for pi",
 	"type": "module",
 	"keywords": [

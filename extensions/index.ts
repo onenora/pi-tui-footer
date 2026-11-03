@@ -58,7 +58,7 @@ export default function piTui(pi: ExtensionAPI): void {
 		ui.setHeader(
 			config.header
 				? (_tui, theme) => ({
-						render: (width) => renderHeader(pi, ctx, theme, info.glyphs(), config.settingsLanguage, width),
+						render: (width) => renderHeader(pi, ctx, theme, info.glyphs(), width),
 						invalidate() {},
 					})
 				: undefined,
