@@ -1,75 +1,56 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+/**
+ * Settings in <agentDir>/pi-tui.json. Files written by 1.x load as-is: known keys are
+ * validated, retired ones are ignored on read and kept on write.
+ */
+
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import type { IconMode } from "./icons.ts";
 
-export type SettingsLanguage = "en" | "zh";
+export type Language = "zh" | "en";
 export type CursorStyle = "block" | "bar" | "underline";
-export type ThinkingPeekLines = 0 | 1 | 2;
-export type ToolViewMode = "native" | "compact";
+export type IconMode = "nerd" | "ascii";
+/** "auto" picks Nerd Font on a local UTF-8 terminal and ASCII elsewhere. */
+export type IconSetting = "auto" | IconMode;
+/** "auto" adds the space on terminals that draw a Nerd icon across the next cell. */
+export type Spacing = "auto" | boolean;
 
-export type { IconMode } from "./icons.ts";
+export const SEGMENTS = [
+	"cwd",
+	"hostname",
+	"sessionName",
+	"gitBranch",
+	"gitStatus",
+	"gitCommit",
+	"runtime",
+	"context",
+	"tokens",
+	"cost",
+	"liveTps",
+	"extensionStatuses",
+	"provider",
+] as const;
+export type Segment = (typeof SEGMENTS)[number];
 
-export interface FooterSegments {
-	cwd: boolean;
-	hostname: boolean;
-	sessionName: boolean;
-	gitBranch: boolean;
-	gitStatus: boolean;
-	gitCommit: boolean;
-	runtime: boolean;
-	context: boolean;
-	tokens: boolean;
-	cost: boolean;
-	liveTps: boolean;
-	extensionStatuses: boolean;
-	capitalizeProviderName: boolean;
-	nerdIconSpacing: boolean;
-}
-
-export interface TelemetryConfig {
+export interface Config {
 	enabled: boolean;
-	tps: boolean;
-	ttft: boolean;
-	duration: boolean;
-	tokens: boolean;
-	stalls: boolean;
-	cost: boolean;
-}
-
-export interface ThinkingPeekConfig {
-	lines: ThinkingPeekLines;
-}
-
-export interface OpenTuiConfig {
-	enabled: boolean;
-	/** Override Pi's header with the open-tui header. When false, the header slot is left to Pi or another extension. */
 	header: boolean;
 	roundedTools: boolean;
-	inlineFooter: boolean;
-	settingsLanguage: SettingsLanguage;
+	settingsLanguage: Language;
 	cursorStyle: CursorStyle;
-	icons: {
-		mode: IconMode;
-	};
-	footerSegments: FooterSegments;
-	telemetry: TelemetryConfig;
-	thinkingPeek: ThinkingPeekConfig;
-	toolView: {
-		mode: ToolViewMode;
-	};
+	icons: { mode: IconSetting };
+	footerSegments: Record<Segment, boolean> & { nerdIconSpacing: Spacing };
+	telemetry: { enabled: boolean };
+	thinkingPeek: { lines: 0 | 1 };
 }
 
-export const DEFAULT_CONFIG: OpenTuiConfig = {
+export const DEFAULTS: Config = {
 	enabled: true,
 	header: true,
 	roundedTools: true,
-	inlineFooter: false,
-	settingsLanguage: "en",
+	settingsLanguage: "zh",
 	cursorStyle: "block",
-	icons: {
-		mode: "auto",
-	},
+	icons: { mode: "auto" },
 	footerSegments: {
 		cwd: true,
 		hostname: false,
@@ -83,138 +64,61 @@ export const DEFAULT_CONFIG: OpenTuiConfig = {
 		cost: true,
 		liveTps: true,
 		extensionStatuses: true,
-		capitalizeProviderName: true,
-		nerdIconSpacing: false,
+		provider: true,
+		nerdIconSpacing: "auto",
 	},
-	telemetry: {
-		enabled: true,
-		tps: true,
-		ttft: true,
-		duration: true,
-		tokens: true,
-		stalls: true,
-		cost: true,
-	},
-	thinkingPeek: {
-		lines: 1,
-	},
-	toolView: {
-		mode: "native",
-	},
+	telemetry: { enabled: true },
+	thinkingPeek: { lines: 1 },
 };
 
-export function getConfigPath(): string {
-	const agentDir = getAgentDir();
-	return join(agentDir, "pi-tui.json");
-}
+type Raw = Record<string, unknown>;
 
-function normalizeThinkingPeekLines(value: unknown): ThinkingPeekLines {
-	return value === 0 || value === 1 || value === 2 ? value : DEFAULT_CONFIG.thinkingPeek.lines;
-}
+const path = () => join(getAgentDir(), "pi-tui.json");
+const obj = (v: unknown): Raw => (v && typeof v === "object" && !Array.isArray(v) ? (v as Raw) : {});
+const bool = (v: unknown, fallback: boolean) => (typeof v === "boolean" ? v : fallback);
+const oneOf = <T extends string>(v: unknown, options: readonly T[], fallback: T): T =>
+	options.includes(v as T) ? (v as T) : fallback;
 
-const ICON_MODES: IconMode[] = ["auto", "nerd", "unicode", "ascii"];
+let raw: Raw = {};
 
-// Non-boolean flags (e.g. "false" strings) fall back to defaults instead of reading as truthy.
-function normalizeFlags<T extends object>(value: unknown, defaults: T): T {
-	const source = typeof value === "object" && value !== null && !Array.isArray(value) ? value : {};
-	const result: Record<string, unknown> = { ...source };
-	for (const [key, fallback] of Object.entries(defaults)) {
-		if (typeof result[key] !== "boolean") result[key] = fallback;
-	}
-	return result as T;
-}
-
-function deepMerge<T>(base: T, override: unknown): T {
-	if (typeof base !== "object" || base === null || Array.isArray(base)) {
-		return (override as T) ?? base;
-	}
-	if (typeof override !== "object" || override === null || Array.isArray(override)) {
-		return base;
-	}
-	const result = { ...(base as Record<string, unknown>) };
-	const overrideRec = override as Record<string, unknown>;
-	for (const key of Object.keys(overrideRec)) {
-		const baseVal = (base as Record<string, unknown>)[key];
-		const overVal = overrideRec[key];
-		if (typeof baseVal === "object" && baseVal !== null && !Array.isArray(baseVal)
-			&& typeof overVal === "object" && overVal !== null && !Array.isArray(overVal)) {
-			result[key] = deepMerge(baseVal, overVal);
-		} else if (overVal !== undefined) {
-			result[key] = overVal;
-		}
-	}
-	return result as T;
-}
-
-export function ensureConfigExists(): void {
-	const path = getConfigPath();
-	if (existsSync(path)) return;
+export function loadConfig(): Config {
 	try {
-		const agentDir = getAgentDir();
-		if (!existsSync(agentDir)) mkdirSync(agentDir, { recursive: true });
-		writeFileSync(path, JSON.stringify(DEFAULT_CONFIG, null, 2) + "\n", "utf8");
+		raw = obj(JSON.parse(readFileSync(path(), "utf8")));
 	} catch {
-		// ponytail: silent fallback — config creation is best-effort
+		raw = {};
 	}
+	const d = DEFAULTS;
+	const segments = obj(raw.footerSegments);
+	const peekLines = obj(raw.thinkingPeek).lines;
+	return {
+		enabled: bool(raw.enabled, d.enabled),
+		header: bool(raw.header, d.header),
+		roundedTools: bool(raw.roundedTools, d.roundedTools),
+		settingsLanguage: oneOf(raw.settingsLanguage, ["zh", "en"], d.settingsLanguage),
+		cursorStyle: oneOf(raw.cursorStyle, ["block", "bar", "underline"], d.cursorStyle),
+		// 1.x also had "auto" and "unicode"; both rendered icons, so they map to nerd.
+		// 1.x "unicode" also drew icons, so it maps to nerd.
+		icons: { mode: oneOf(obj(raw.icons).mode === "unicode" ? "nerd" : obj(raw.icons).mode, ["auto", "nerd", "ascii"], d.icons.mode) },
+		footerSegments: {
+			...(Object.fromEntries(SEGMENTS.map((key) => [key, bool(segments[key], d.footerSegments[key])])) as Record<Segment, boolean>),
+			nerdIconSpacing: typeof segments.nerdIconSpacing === "boolean" ? segments.nerdIconSpacing : d.footerSegments.nerdIconSpacing,
+		},
+		telemetry: { enabled: bool(obj(raw.telemetry).enabled, d.telemetry.enabled) },
+		thinkingPeek: { lines: peekLines === undefined ? d.thinkingPeek.lines : peekLines === 0 ? 0 : 1 },
+	};
 }
 
-export function loadConfig(notify?: (msg: string, level: "warning" | "info") => void): OpenTuiConfig {
-	const path = getConfigPath();
-	if (!existsSync(path)) {
-		ensureConfigExists();
-		return structuredClone(DEFAULT_CONFIG);
-	}
-
+export function saveConfig(config: Config): void {
+	const merged: Raw = {
+		...raw,
+		...config,
+		footerSegments: { ...obj(raw.footerSegments), ...config.footerSegments },
+		telemetry: { ...obj(raw.telemetry), ...config.telemetry },
+	};
 	try {
-		const raw = readFileSync(path, "utf8");
-		const parsed: unknown = JSON.parse(raw);
-		const config = deepMerge(DEFAULT_CONFIG, parsed);
-		if (typeof config.enabled !== "boolean") {
-			config.enabled = DEFAULT_CONFIG.enabled;
-		}
-		if (typeof config.header !== "boolean") {
-			config.header = DEFAULT_CONFIG.header;
-		}
-		if (typeof config.inlineFooter !== "boolean") {
-			config.inlineFooter = DEFAULT_CONFIG.inlineFooter;
-		}
-		if (typeof config.roundedTools !== "boolean") {
-			config.roundedTools = DEFAULT_CONFIG.roundedTools;
-		}
-		config.footerSegments = normalizeFlags(config.footerSegments, DEFAULT_CONFIG.footerSegments);
-		config.telemetry = normalizeFlags(config.telemetry, DEFAULT_CONFIG.telemetry);
-		if (typeof config.icons !== "object" || config.icons === null || !ICON_MODES.includes(config.icons.mode)) {
-			config.icons = structuredClone(DEFAULT_CONFIG.icons);
-		}
-		if (config.settingsLanguage !== "en" && config.settingsLanguage !== "zh") {
-			config.settingsLanguage = DEFAULT_CONFIG.settingsLanguage;
-		}
-		if (config.cursorStyle !== "block" && config.cursorStyle !== "bar" && config.cursorStyle !== "underline") {
-			config.cursorStyle = DEFAULT_CONFIG.cursorStyle;
-		}
-		if (typeof config.thinkingPeek !== "object" || config.thinkingPeek === null || Array.isArray(config.thinkingPeek)) {
-			config.thinkingPeek = structuredClone(DEFAULT_CONFIG.thinkingPeek);
-		} else {
-			config.thinkingPeek.lines = normalizeThinkingPeekLines(config.thinkingPeek.lines);
-		}
-		if (typeof config.toolView !== "object" || config.toolView === null
-			|| (config.toolView.mode !== "native" && config.toolView.mode !== "compact")) {
-			config.toolView = structuredClone(DEFAULT_CONFIG.toolView);
-		}
-		return config;
-	} catch (err) {
-		notify?.(`pi-tui config parse error: ${err instanceof Error ? err.message : String(err)}`, "warning");
-		return structuredClone(DEFAULT_CONFIG);
-	}
-}
-
-export function saveConfig(config: OpenTuiConfig): void {
-	const path = getConfigPath();
-	try {
-		const agentDir = getAgentDir();
-		if (!existsSync(agentDir)) mkdirSync(agentDir, { recursive: true });
-		writeFileSync(path, JSON.stringify(config, null, 2) + "\n", "utf8");
+		writeFileSync(path(), `${JSON.stringify(merged, null, 2)}\n`);
+		raw = merged;
 	} catch {
-		// ponytail: silent fallback — config save is best-effort
+		// Read-only agent dir: the change still applies to this session.
 	}
 }

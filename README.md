@@ -1,14 +1,30 @@
 # pi-tui-footer
 
-[pi](https://github.com/earendil-works/pi) 的 TUI 增强扩展：头部、Starship 风格底栏、圆角编辑器、思考预览、回合遥测和圆角工具框。仅依赖 pi 内置模块与 Node 内置模块，无第三方运行时依赖。
+[pi](https://github.com/earendil-works/pi) 的 TUI 增强扩展：头部、状态底栏、圆角编辑器、思考预览、回合遥测和无背景的圆角工具框。只用 pi 公开的扩展 API，无第三方运行时依赖。
 
 ## 特性
 
-- **头部**：Logo、版本、模型与思考强度、工作目录、命令提示
-- **底栏**：路径、Git、环境、计时与实时 TPS、上下文用量、Token 与费用
-- **编辑器**：圆角边框、内嵌工作状态、可选光标样式
-- **工具框**：圆角边框，颜色随执行状态变化；可切换为紧凑两行视图（`toolView.mode: "compact"`，此时不加圆角框）
-- **遥测与思考**：每轮 TPS、TTFT、耗时统计，隐藏思考时预览末尾内容
+- **头部**：Logo、pi 版本、模型与思考强度、工作目录、命令提示
+- **底栏**：第一行左侧目录、会话名、Git 分支与状态（冲突、改动、暂存、未跟踪、stash、领先/落后）、运行时版本、本轮计时与实时 TPS，右侧上下文用量条（≥70% 黄色，≥90% 红色）；第二行左侧供应商、模型与思考强度，右侧输入（未缓存 + 缓存读取）、输出、缓存命中率与费用；第三行其他扩展的 `setStatus()` 状态。窄屏时按优先级压缩，每一段都可单独开关
+- **编辑器**：圆角边框，工作状态嵌在上边框；光标样式可选方块 / 竖线 / 下划线
+- **消息**：发送的消息去掉背景色块并靠右显示
+- **思考预览**：思考时在工作状态里显示最新一行
+- **回合遥测**：每次回答结束提示 TPS、首字延迟、耗时、Token、卡顿和费用
+- **工具框**：去掉 pi 的背景色，调用与结果合成一个圆角框；边框运行中黄色、失败红色。自行绘制外框的第三方工具保持原样
+- **图标**：自动 / Nerd Font / ASCII；自动时本地 UTF-8 终端用 Nerd Font，其余回退 ASCII，Kitty 与 Ghostty 下自动在图标后留空
+
+```
+╭──────────────────────────────────────────────╮
+│ $ bun run check                              │
+│                                              │
+│ Extension loaded successfully.               │
+╰──────────────────────────────────────────────╯
+╭─────────────────────────────────────────────────────────────────────╮
+│ prompt                                                              │
+╰─────────────────────────────────────────────────────────────────────╯
+@ ~/demo * main [!2 ?1] node 22.1.0 + done 3s     # [#-------] 12.6% · 126k/1.0M
+M · Anthropic · Claude Opus · ~ high  ↑ 3.1M (U 405k + R 2.7M) | ↓ 16k | $ $0.305
+```
 
 ## 安装
 
@@ -16,33 +32,19 @@
 pi install npm:pi-tui-footer
 ```
 
-更新：
-
-```bash
-pi update --extensions
-```
-
 ## 配置
 
-运行 `/pi-tui` 打开设置菜单，改动即时生效。
-
-也可以编辑 `~/.pi/agent/pi-tui.json`，只写需要修改的字段：
+运行 `/pi-tui` 打开设置菜单（中文 / English，分通用 / 功能 / 底栏三页，Tab 或 ←→ 翻页），改动即时生效并保存到 `~/.pi/agent/pi-tui.json`。也可以直接编辑该文件，只写需要修改的字段：
 
 ```json
 {
-  "inlineFooter": true,
   "cursorStyle": "bar",
-  "icons": { "mode": "unicode" },
-  "thinkingPeek": { "lines": 2 }
+  "icons": { "mode": "auto" },
+  "footerSegments": { "sessionName": true }
 }
 ```
 
-全部配置项见 [`extensions/config.ts`](extensions/config.ts)。
-
-## 致谢
-
-- [pi-open-tui](https://github.com/OldSuns/pi-open-tui)
-- [pi-rounded-tools](https://github.com/orionpax1997/pi-rounded-tools)
+全部配置项见 [`extensions/config.ts`](extensions/config.ts)。1.x 的配置文件可直接沿用，已移除的字段读取时忽略、保存时保留。
 
 ## 许可
 

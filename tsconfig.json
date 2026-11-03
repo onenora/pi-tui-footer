@@ -4,10 +4,9 @@
 		"module": "ESNext",
 		"moduleResolution": "bundler",
 		"strict": true,
-		"allowImportingTsExtensions": true,
-		"noEmit": true,
 		"skipLibCheck": true,
-		"types": ["node"]
+		"noEmit": true,
+		"allowImportingTsExtensions": true
 	},
 	"include": ["extensions/**/*"]
 }

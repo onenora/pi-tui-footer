@@ -1,12 +1,13 @@
 {
 	"name": "pi-tui-footer",
-	"version": "1.4.7",
-	"description": "pi extension: TUI footer/header with git status, telemetry, rounded tools, editor and settings enhancements",
+	"version": "2.0.0",
+	"description": "Header, status footer, rounded editor and background-free rounded tool frames for pi",
 	"type": "module",
 	"keywords": [
 		"pi-package",
 		"pi-extension",
-		"tui"
+		"tui",
+		"footer"
 	],
 	"license": "MIT",
 	"files": [
@@ -22,11 +23,8 @@
 		"extensions": ["./extensions"]
 	},
 	"scripts": {
-		"check": "bun -e 'import * as index from \"./extensions/index.ts\"; import * as tools from \"./extensions/rounded-tools.ts\"; console.log(\"All extension modules passed integrity check.\");'",
-		"test": "bun test",
-		"sync": "bun scripts/sync-upstream.ts",
-		"sync:check": "bun scripts/sync-upstream.ts --check",
-		"sync:apply": "bun scripts/sync-upstream.ts --apply"
+		"check": "bun -e 'import ext from \"./extensions/index.ts\"; console.log(\"Extension loaded successfully.\");'",
+		"typecheck": "tsc --noEmit"
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-ai": "*",
@@ -37,6 +35,7 @@
 		"@earendil-works/pi-ai": "*",
 		"@earendil-works/pi-coding-agent": "*",
 		"@earendil-works/pi-tui": "*",
-		"@types/node": "^22.0.0"
+		"@types/node": "^22.0.0",
+		"typescript": "^5.0.0"
 	}
 }

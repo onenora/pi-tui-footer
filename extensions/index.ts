@@ -1,464 +1,167 @@
 /**
- * pi-tui-footer — full TUI polish for pi: Pi logo header,
- * Starship-style footer, rounded editor with embedded working status,
- * thinking peek preview, rounded tool frames, and turn telemetry.
- *
- * Integrated from:
- *   - pi-open-tui (v0.4.0, MIT, by OldSun, https://github.com/OldSuns/pi-open-tui)
- *   - pi-rounded-tools (v0.1.3, MIT, by OrionPax, https://github.com/orionpax1997/pi-rounded-tools)
- *
- * Security audit notes:
- *   - zero third-party runtime deps (pi core bundles + node built-ins only)
- *   - execFile runs only hardcoded git / runtime version commands (no shell
- *     injection surface); fs access limited to ~/.pi/agent/pi-tui.json
- *   - no network / eval / obfuscation / credential reads
+ * pi-tui: header, rounded editor, status footer, rounded tool frames, thinking peek and run
+ * telemetry, configured with `/pi-tui` and stored in <agentDir>/pi-tui.json.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { type OpenTuiConfig, DEFAULT_CONFIG, ensureConfigExists, loadConfig, saveConfig } from "./config.ts";
-import { installEditor } from "./editor.ts";
-import { installFooter } from "./footer.ts";
-import { installHeader } from "./header.ts";
-import { emptyGitStatus, readGitStatus } from "./git.ts";
-import { readRuntimeInfo } from "./runtime.ts";
-import { RoundedToolsManager } from "./rounded-tools.ts";
-import { SessionLifecycle } from "./session-lifecycle.ts";
-import { registerSettingsCommand } from "./settings-command.ts";
-import { formatTurnTelemetry, TurnTelemetryTracker } from "./telemetry.ts";
-import { registerToolView } from "./tool-view.ts";
-import {
-	createInitialState,
-	getModelMeta,
-	invalidateUsageCache,
-	type FooterState,
-} from "./state.ts";
-import { resolveGlyphs } from "./icons.ts";
-import {
-	buildPeekLabel,
-	collectPeekParts,
-	createPeekState,
-	reducePeek,
-	type PeekState,
-} from "./peek.ts";
+import { type Config, loadConfig, saveConfig } from "./config.ts";
+import { CURSOR_RESET, RoundedEditor } from "./editor.ts";
+import { FooterInfo } from "./footer.ts";
+import { oneLine } from "./format.ts";
+import { renderHeader } from "./header.ts";
+import { openSettings } from "./settings.ts";
+import { formatSummary, Telemetry } from "./telemetry.ts";
+import { registerTools } from "./tools.ts";
+import { plainUserMessages } from "./user-message.ts";
 
-type PendingUiChange = "install" | "uninstall";
+const PEEK_CHARS = 48;
 
-export function getPendingUiChange(enabled: boolean, active: boolean): PendingUiChange | undefined {
-	if (enabled === active) return undefined;
-	return enabled ? "install" : "uninstall";
-}
+export default function piTui(pi: ExtensionAPI): void {
+	let config = loadConfig();
+	let session: ExtensionContext | undefined;
+	let redraw = () => {};
+	let resetCursor = () => {};
+	let ticker: ReturnType<typeof setInterval> | undefined;
+	let thinking = "";
+	let peeking = false;
 
-function isTuiContext(ctx: ExtensionContext): boolean {
-	try {
-		const mode = (ctx as ExtensionContext & { mode?: string }).mode;
-		return ctx.hasUI && (mode === undefined || mode === "tui");
-	} catch {
-		return false;
-	}
-}
+	const telemetry = new Telemetry();
+	const info = new FooterInfo(pi, () => config, telemetry, () => redraw());
 
-export default function (pi: ExtensionAPI) {
-	const sessionLifecycle = new SessionLifecycle();
-	const state: FooterState = createInitialState();
-	const turnTelemetry = new TurnTelemetryTracker();
-	const roundedTools = new RoundedToolsManager(pi);
+	registerTools(pi, () => config.enabled && config.roundedTools);
+	plainUserMessages(() => config.enabled);
 
-	let config: OpenTuiConfig = structuredClone(DEFAULT_CONFIG);
-	let configLoaded = false;
-	let active = false;
-	let lastCtx: ExtensionContext | undefined;
-	let requestFooterRender: (() => void) | undefined;
-	let workingTimer: ReturnType<typeof setInterval> | undefined;
-	let cleanupHeader: (() => void) | undefined;
-	let cleanupFooter: (() => void) | undefined;
-	let editor: ReturnType<typeof installEditor> | undefined;
-	let pendingUiChange: PendingUiChange | undefined;
-
-	// thinking-peek state (rendered by Pi inside its hidden-thinking block)
-	const peek: PeekState = createPeekState();
-	let peekFrame = 0;
-	let peekSettleTimer: ReturnType<typeof setTimeout> | undefined;
-	let peekTaskEpoch = 0; // bumped at every agent task boundary
-	let peekLabelActive = false;
-
-	const getThinkingLevel = () => (sessionLifecycle.isCurrent() ? pi.getThinkingLevel() : "off");
-
-	/** True while the agent is running (false during session-restore replay). */
-	const isAgentIdle = (ctx: ExtensionContext): boolean => {
-		try {
-			return (ctx as ExtensionContext & { isIdle?: () => boolean }).isIdle?.() === true;
-		} catch {
-			return false;
-		}
-	};
-
-	/** Pi decides whether this label is visible; our toggle only controls updates. */
-	const isPeekEnabled = () => sessionLifecycle.isCurrent() && config.enabled && config.thinkingPeek.lines > 0 && active;
-
-	const setPeekLabel = (ctx?: ExtensionContext): void => {
-		if (!isPeekEnabled() || peek.phase === "idle") return;
-		const target = ctx ?? lastCtx;
-		if (!target || !isTuiContext(target)) return;
-		if (!editor) throw new Error("Open TUI editor is not installed");
-		const snapshot = { ...peek };
-		const frame = peekFrame;
-		const glyphs = resolveGlyphs(config.icons.mode);
-		const lines = config.thinkingPeek.lines;
-		editor.setLatestHiddenThinkingLabel((width) => buildPeekLabel(snapshot, frame, glyphs, width, lines));
-		peekLabelActive = true;
-	};
-
-	const clearPeekLabel = (ctx?: ExtensionContext): void => {
-		if (!peekLabelActive) return;
-		const target = ctx ?? lastCtx;
-		if (!target || !isTuiContext(target)) return;
-		// The global reset is safe here: every completed message returns to Pi's native label.
-		target.ui.setHiddenThinkingLabel();
-		peekLabelActive = false;
-	};
-
-	/** Reset peek state to idle and cancel any scheduled cleanup. */
-	const resetPeek = () => {
-		peek.phase = "idle";
-		peek.tail = "";
-		editor?.resetHiddenThinkingLabelTarget();
-		if (peekSettleTimer) {
-			clearTimeout(peekSettleTimer);
-			peekSettleTimer = undefined;
-		}
-	};
-	const applyUi = (ctx: ExtensionContext) => {
-		if (!isTuiContext(ctx)) return;
+	const install = (ctx: ExtensionContext) => {
+		if (!ctx.hasUI) return;
+		const ui = ctx.ui;
 		if (!config.enabled) {
-			uninstallUi(ctx);
+			resetCursor();
+			ui.setHeader(undefined);
+			ui.setEditorComponent(undefined);
+			ui.setFooter(undefined);
 			return;
 		}
-		if (!active) {
-			// Leave the header slot alone when disabled so another extension's header survives.
-			if (config.header) cleanupHeader = installHeader(pi, ctx);
-			const footer = installFooter(
-				ctx,
-				() => state,
-				() => config,
-				() => getModelMeta(ctx, getThinkingLevel, config.footerSegments.capitalizeProviderName),
-				{
-					setRequestRender: (fn) => {
-						requestFooterRender = fn ?? undefined;
-					},
-					scheduleGitRefresh: () => {
-						void scheduleGitRefresh(ctx);
-					},
-					getLiveTps: () => turnTelemetry.getLiveTps(),
+		ui.setFooter((tui, theme, data) => {
+			const own = () => tui.requestRender();
+			redraw = own;
+			info.data = data;
+			const offBranch = data.onBranchChange(() => void info.refreshGit(ctx.cwd));
+			return {
+				render: (width) => info.render(ctx, theme, width),
+				invalidate() {},
+				dispose() {
+					offBranch();
+					if (redraw === own) redraw = () => {};
 				},
-			);
-			cleanupFooter = footer.cleanup;
-			editor = installEditor(
-				pi,
-				ctx,
-				config.cursorStyle,
-				{
-					enabled: () => config.inlineFooter,
-					render: footer.renderInline,
-				},
-			);
-			active = true;
-		}
-	};
-
-	const uninstallUi = (ctx: ExtensionContext) => {
-		if (!isTuiContext(ctx)) return;
-		if (active) {
-			cleanupHeader?.();
-			cleanupFooter?.();
-			editor?.cleanup();
-			cleanupHeader = undefined;
-			cleanupFooter = undefined;
-			editor = undefined;
-			requestFooterRender = undefined;
-			resetPeek();
-			clearPeekLabel(ctx);
-			active = false;
-		}
-	};
-
-	const scheduleGitRefresh = async (ctx: ExtensionContext) => {
-		if (!sessionLifecycle.isCurrent()) return;
-		const segs = config.footerSegments;
-		// gitCommit only appends a tag to the gitBranch segment, so it never needs git on its own.
-		if (!segs.gitBranch && !segs.gitStatus) {
-			state.git = emptyGitStatus();
-			requestFooterRender?.();
-			return;
-		}
-		const generation = sessionLifecycle.currentGeneration();
-		const cwd = ctx.cwd;
-		const git = await readGitStatus(cwd, {
-			readCommit: segs.gitBranch,
-			readTag: segs.gitBranch && segs.gitCommit,
-			readCounts: segs.gitStatus,
+			};
 		});
-		if (!sessionLifecycle.isCurrent(generation)) return;
-		state.git = git;
-		requestFooterRender?.();
+		ui.setHeader(
+			config.header
+				? (_tui, theme) => ({
+						render: (width) => renderHeader(pi, ctx, theme, info.glyphs(), config.settingsLanguage, width),
+						invalidate() {},
+					})
+				: undefined,
+		);
+		ui.setEditorComponent((tui, theme, keybindings) => {
+			resetCursor = () => tui.terminal.write(CURSOR_RESET);
+			return new RoundedEditor(tui, theme, keybindings, () => config.cursorStyle);
+		});
 	};
 
-	const refreshRuntime = async (ctx: ExtensionContext) => {
-		if (!sessionLifecycle.isCurrent()) return;
-		const generation = sessionLifecycle.currentGeneration();
-		const cwd = ctx.cwd;
-		const runtime = await readRuntimeInfo(cwd);
-		if (!sessionLifecycle.isCurrent(generation)) return;
-		state.runtime = runtime;
-		requestFooterRender?.();
+	const stopTicker = () => {
+		if (ticker) clearInterval(ticker);
+		ticker = undefined;
 	};
 
-	const applyRoundedTools = () => {
-		// Resolvers chain in registration order, so frames would wrap the compact tool view; yield to it.
-		roundedTools.setEnabled(config.enabled && config.roundedTools && config.toolView.mode === "native");
+	const stopPeek = (ctx: ExtensionContext) => {
+		thinking = "";
+		if (!peeking) return;
+		peeking = false;
+		ctx.ui.setWorkingMessage();
 	};
 
-	// The renderer resolver is installed when RoundedToolsManager is constructed
-	// (before session_start), so a /reload transcript rebuild already uses it.
-	// Toggling the setting affects components created afterwards; already-rendered
-	// historical components keep their frames until the next transcript rebuild.
-	config = loadConfig();
-	configLoaded = true;
-	applyRoundedTools();
-
-	const refreshInteractiveState = (ctx: ExtensionContext, project = false) => {
-		if (!sessionLifecycle.isCurrent() || !ctx.hasUI) return;
-		if (project) {
-			void scheduleGitRefresh(ctx);
-			void refreshRuntime(ctx);
-		}
-		requestFooterRender?.();
-	};
-
-	const startWorkingTimer = () => {
-		stopWorkingTimer();
-		const tick = () => {
-			if (!sessionLifecycle.isCurrent() || !active) return;
-			requestFooterRender?.();
-		};
-		tick();
-		workingTimer = setInterval(tick, 250);
-		workingTimer.unref?.();
-	};
-
-	const stopWorkingTimer = () => {
-		if (workingTimer) {
-			clearInterval(workingTimer);
-			workingTimer = undefined;
-		}
-	};
-
-	pi.on("session_start", async (_event, ctx) => {
-		sessionLifecycle.start();
-		lastCtx = ctx;
-		state.sessionStartEpoch = Date.now();
-		state.workingSince = undefined;
-		state.lastDoneIn = undefined;
-		invalidateUsageCache();
-
-		ensureConfigExists();
-		config = loadConfig((msg, level) => ctx.ui.notify(msg, level));
-		configLoaded = true;
-		clearPeekLabel(ctx);
-
-		applyUi(ctx);
-		applyRoundedTools();
-
-		refreshInteractiveState(ctx, true);
+	pi.on("session_start", (_event, ctx) => {
+		session = ctx;
+		info.reset();
+		void info.refreshGit(ctx.cwd);
+		void info.refreshRuntime(ctx.cwd);
+		install(ctx);
 	});
 
-	pi.on("session_shutdown", async (_event, ctx) => {
-		sessionLifecycle.shutdown();
-		stopWorkingTimer();
-		if (active) {
-			uninstallUi(ctx);
-		}
-		lastCtx = undefined;
+	pi.on("session_shutdown", (_event, ctx) => {
+		stopTicker();
+		stopPeek(ctx);
+		resetCursor();
 	});
 
-	pi.on("agent_start", (event, _ctx) => {
-		turnTelemetry.handle(event);
-		if (!sessionLifecycle.isCurrent()) return;
-		// agent_start also covers custom-message and continuation-triggered tasks
-		// that do not emit a user message_start event.
-		peekTaskEpoch++;
-		state.workingSince = Date.now();
-		state.lastDoneIn = undefined;
-		startWorkingTimer();
-	});
-
-	pi.on("agent_end", (_event, _ctx) => {
-		if (!sessionLifecycle.isCurrent()) return;
-		stopWorkingTimer();
-		if (state.workingSince !== undefined) {
-			state.lastDoneIn = Date.now() - state.workingSince;
-			state.workingSince = undefined;
-		}
-		requestFooterRender?.();
-	});
-
-	pi.on("turn_start", (event) => {
-		turnTelemetry.handle(event);
-	});
-
-	pi.on("message_start", (event, ctx) => {
-		turnTelemetry.handle(event);
-		if (!sessionLifecycle.isCurrent() || isAgentIdle(ctx)) return;
-		const role = event.message?.role;
-		if (role === "user") {
-			// Restore Pi's native label until real thinking arrives. The task epoch is
-			// advanced by agent_start so custom/no-user tasks are covered too.
-			resetPeek();
-			clearPeekLabel(ctx);
-		} else if (role === "assistant") {
-			resetPeek();
-			clearPeekLabel(ctx);
-		}
+	// Every agent loop restarts the footer timer, which stops at agent_end.
+	pi.on("agent_start", () => {
+		telemetry.start();
+		info.runStart = Date.now();
+		info.lastRunMs = undefined;
+		if (!ticker) ticker = setInterval(() => redraw(), 1000);
+		redraw();
 	});
 
 	pi.on("message_update", (event, ctx) => {
-		turnTelemetry.handle(event);
-		if (!sessionLifecycle.isCurrent() || isAgentIdle(ctx)) return;
-		if (!isPeekEnabled()) return;
-		const message = event.message;
-		if (!message || message.role !== "assistant") return;
-		if (peek.phase === "done") return;
-		const parts = collectPeekParts(message.content);
-		const next = reducePeek(peek, parts);
-		const changed = next.phase !== peek.phase || next.tail !== peek.tail;
-		peek.phase = next.phase;
-		peek.tail = next.tail;
-		if (!changed) return;
-		if (peek.phase === "thinking") {
-			peekFrame++;
-			setPeekLabel(ctx);
-		} else if (peek.phase === "done") {
-			setPeekLabel(ctx);
+		const e = event.assistantMessageEvent;
+		if (e.type === "text_delta" || e.type === "thinking_delta" || e.type === "toolcall_delta") telemetry.delta(e.delta);
+		if (e.type !== "thinking_delta") {
+			if (e.type === "thinking_end" || e.type === "text_start" || e.type === "toolcall_start") stopPeek(ctx);
+			return;
 		}
-	});
-
-	pi.on("tool_execution_start", (event) => {
-		turnTelemetry.handle(event);
-	});
-
-	pi.on("turn_end", (event) => {
-		turnTelemetry.handle(event);
-	});
-
-	pi.on("agent_settled", (event, ctx) => {
-		const telemetry = turnTelemetry.handle(event);
-		if (telemetry && config.enabled && config.telemetry.enabled && isTuiContext(ctx)) {
-			const message = formatTurnTelemetry(telemetry, ctx.ui.theme, config.telemetry, config.icons.mode);
-			if (message) ctx.ui.notify(message, "info");
-		}
-		// Only clear the peek label when this task is still the current one.
-		const settleEpoch = peekTaskEpoch;
-		if (peekSettleTimer) clearTimeout(peekSettleTimer);
-		peekSettleTimer = setTimeout(() => {
-			peekSettleTimer = undefined;
-			if (!sessionLifecycle.isCurrent() || peekTaskEpoch !== settleEpoch) return;
-			resetPeek();
-			clearPeekLabel(ctx);
-		}, 300);
-	});
-
-	pi.on("model_select", (_event, ctx) => {
-		refreshInteractiveState(ctx);
-	});
-
-	pi.on("thinking_level_select", (_event, ctx) => {
-		refreshInteractiveState(ctx);
+		if (!ctx.hasUI || !config.enabled || config.thinkingPeek.lines === 0) return;
+		thinking = (thinking + e.delta).slice(-1000);
+		const line = oneLine(thinking.split("\n").filter((l) => l.trim()).at(-1) ?? "");
+		if (!line) return;
+		ctx.ui.setWorkingMessage(line.length > PEEK_CHARS ? `…${line.slice(-PEEK_CHARS)}` : line);
+		peeking = true;
 	});
 
 	pi.on("message_end", (event, ctx) => {
-		turnTelemetry.handle(event);
-		if (!sessionLifecycle.isCurrent()) return;
-		if (event.message?.role === "assistant" && peek.phase === "thinking") {
-			// Sub-message finished (answer text or a tool call): freeze the peek line.
-			peek.phase = "done";
-			setPeekLabel(ctx);
+		if (event.message.role !== "assistant") return;
+		telemetry.messageEnd(event.message.usage);
+		stopPeek(ctx);
+	});
+
+	pi.on("tool_execution_end", (_event, ctx) => void info.refreshGit(ctx.cwd));
+
+	pi.on("agent_end", (_event, ctx) => {
+		stopPeek(ctx);
+		stopTicker();
+		if (info.runStart !== undefined) info.lastRunMs = Date.now() - info.runStart;
+		info.runStart = undefined;
+		redraw();
+		void info.refreshGit(ctx.cwd);
+	});
+
+	pi.on("agent_settled", (_event, ctx) => {
+		const summary = telemetry.finish();
+		if (summary && ctx.hasUI && config.enabled && config.telemetry.enabled) {
+			ctx.ui.notify(formatSummary(summary, ctx.ui.theme, info.glyphs()), "info");
 		}
-		invalidateUsageCache();
-		refreshInteractiveState(ctx);
+		redraw();
 	});
 
-	pi.on("tool_execution_end", (_event, ctx) => {
-		refreshInteractiveState(ctx);
-	});
+	pi.on("model_select", () => redraw());
+	pi.on("thinking_level_select", () => redraw());
 
-	pi.on("session_compact", (_event, ctx) => {
-		if (!sessionLifecycle.isCurrent()) return;
-		invalidateUsageCache();
-		refreshInteractiveState(ctx);
-	});
-
-	pi.on("session_tree", (_event, ctx) => {
-		if (!sessionLifecycle.isCurrent()) return;
-		invalidateUsageCache();
-		refreshInteractiveState(ctx);
-	});
-
-	if (typeof pi.registerToolRenderer === "function") {
-		registerToolView(
-			pi,
-			() => {
-				// Resumed sessions rebuild their rows before session_start fires, so read the file once here.
-				if (!configLoaded) {
-					config = loadConfig();
-					configLoaded = true;
-				}
-				return config.enabled ? config.toolView.mode : "native";
-			},
-			() => resolveGlyphs(config.icons.mode),
-		);
-	}
-
-	registerSettingsCommand(pi, {
-		getConfig: () => config,
-		onConfigChanged: (newConfig) => {
-			const cursorStyleChanged = config.cursorStyle !== newConfig.cursorStyle;
-			const headerChanged = config.header !== newConfig.header;
-			const thinkingPeekLinesChanged = config.thinkingPeek.lines !== newConfig.thinkingPeek.lines;
-			saveConfig(newConfig);
-			config = newConfig;
-			if (newConfig.thinkingPeek.lines === 0 || !newConfig.enabled) {
-				resetPeek();
-				clearPeekLabel(lastCtx);
-			} else if (thinkingPeekLinesChanged && peekLabelActive) {
-				setPeekLabel(lastCtx);
-			}
-			if (cursorStyleChanged && active && editor) {
-				editor.setCursorStyle(newConfig.cursorStyle);
-			}
-			if (headerChanged && active && lastCtx) {
-				cleanupHeader?.();
-				cleanupHeader = newConfig.header ? installHeader(pi, lastCtx) : undefined;
-			}
-			if (lastCtx) {
-				pendingUiChange = getPendingUiChange(newConfig.enabled, active);
-			}
-			applyRoundedTools();
-			const gitNeeded = newConfig.footerSegments.gitBranch || newConfig.footerSegments.gitStatus;
-			if (lastCtx && gitNeeded) {
-				void scheduleGitRefresh(lastCtx);
-			} else {
-				state.git = emptyGitStatus();
-			}
-			requestFooterRender?.();
-		},
-		onOverlayClosed: () => {
-			if (!lastCtx || pendingUiChange === undefined) return;
-			const change = pendingUiChange;
-			pendingUiChange = undefined;
-			if (!config.enabled || change === "uninstall") {
-				uninstallUi(lastCtx);
-			} else {
-				applyUi(lastCtx);
-			}
+	pi.registerCommand("pi-tui", {
+		description: "pi-tui settings / 界面设置",
+		handler: async (_args, ctx) => {
+			if (!ctx.hasUI) return;
+			const before = config;
+			await openSettings(
+				ctx,
+				() => config,
+				(next: Config) => {
+					config = next;
+					saveConfig(next);
+					redraw();
+				},
+			);
+			if (config.enabled !== before.enabled || config.header !== before.header) install(session ?? ctx);
 		},
 	});
 }

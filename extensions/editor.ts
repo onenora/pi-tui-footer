@@ -1,446 +1,148 @@
+/**
+ * Rounded editor frame with the working status in the top border (pi-tui-footer 1.4.8 look):
+ *   ╭── ⠋ Working… ─────────────────────────────╮
+ *   │ prompt text                                │
+ *   ╰────────────────────────────────────────────╯
+ */
+
+import { CustomEditor, type KeybindingsManager } from "@earendil-works/pi-coding-agent";
 import {
-	CustomEditor,
-	type ExtensionAPI,
-	type ExtensionContext,
-	type KeybindingsManager,
-} from "@earendil-works/pi-coding-agent";
-import type { EditorTheme, TuiMouseEvent, TuiMouseEventResult, TUI } from "@earendil-works/pi-tui";
-import { CURSOR_MARKER, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+	type EditorTheme,
+	type TUI,
+	type TuiMouseEvent,
+	type TuiMouseEventResult,
+	truncateToWidth,
+	visibleWidth,
+} from "@earendil-works/pi-tui";
 import type { CursorStyle } from "./config.ts";
-import { findBottomBorderIndex, isEditorBorderLine, stripAnsi } from "./utils.ts";
 
-function fillLine(content: string, width: number): string {
-	const truncated = truncateToWidth(content, Math.max(0, width), "");
-	const pad = " ".repeat(Math.max(0, width - visibleWidth(truncated)));
-	return `${truncated}${pad}`;
-}
+type StatusIndicator = Parameters<CustomEditor["setWorkingStatusIndicator"]>[0];
 
-const CURSOR_STYLE_SEQUENCES: Partial<Record<CursorStyle, string>> = {
-	bar: "\x1b[6 q",
-	underline: "\x1b[4 q",
-};
-const DEFAULT_CURSOR_STYLE_SEQUENCE = "\x1b[0 q";
-const EDITOR_FRAME_LEFT_INSET = 2;
-const EDITOR_FRAME_HORIZONTAL_CHROME = EDITOR_FRAME_LEFT_INSET * 2;
+const CURSOR_SEQ: Record<CursorStyle, string> = { block: "\x1b[2 q", bar: "\x1b[6 q", underline: "\x1b[4 q" };
+export const CURSOR_RESET = "\x1b[0 q";
 
-interface WorkingStatusIndicator {
-	renderInBorder(width: number): string;
-	renderSpinnerInBorder(width: number): string;
-}
-
-export interface InlineFooterLine {
-	left: string;
-	right: string;
-}
-
-export interface InlineFooterRenderer {
-	enabled(): boolean;
-	render(width: number): { top: InlineFooterLine; bottom: InlineFooterLine } | undefined;
-}
-
-interface HiddenThinkingLabelComponent {
-	children: unknown[];
-	outputPad?: unknown;
-	render(width: number): string[];
-	setHiddenThinkingLabel(label: string): void;
-	setHideThinkingBlock(hide: boolean): void;
-	updateContent(message: unknown, isStreaming?: boolean): void;
-}
-
-function isHiddenThinkingLabelComponent(value: object): value is HiddenThinkingLabelComponent {
-	const component = value as unknown as Record<string, unknown>;
-	return Array.isArray(component.children)
-		&& typeof component.render === "function"
-		&& typeof component.setHiddenThinkingLabel === "function"
-		&& typeof component.setHideThinkingBlock === "function"
-		&& typeof component.updateContent === "function";
-}
-
-/** Ponytail until Pi exposes a per-message hidden-thinking label API. */
-function findLatestHiddenThinkingLabel(tui: TUI): HiddenThinkingLabelComponent {
-	const pending: unknown[] = [tui];
-	const visited = new Set<object>();
-	let latest: HiddenThinkingLabelComponent | undefined;
-	while (pending.length > 0) {
-		const value = pending.pop();
-		if (!value || typeof value !== "object" || visited.has(value)) continue;
-		visited.add(value);
-		if (isHiddenThinkingLabelComponent(value)) latest = value;
-		const children = (value as { children?: unknown }).children;
-		if (!Array.isArray(children)) continue;
-		for (let i = children.length - 1; i >= 0; i--) pending.push(children[i]);
-	}
-	if (!latest) throw new Error("Unable to find the active hidden-thinking component");
-	return latest;
-}
-
-/** Width Pi's hidden-thinking `Text(label, outputPad, 0)` wraps at when its message renders at `width`. */
-function hiddenThinkingTextWidth(width: number, outputPad: unknown): number {
-	const pad = typeof outputPad === "number" && Number.isFinite(outputPad) ? Math.max(0, Math.floor(outputPad)) : 1;
-	const paddingX = Math.min(pad, Math.max(0, Math.floor((width - 1) / 2)));
-	return Math.max(1, width - paddingX * 2);
-}
-
-// pi-tui's renderFakeCursor() markers (FAKE_CURSOR_START/END, not exported). Truncation can drop the end marker.
-const FAKE_CURSOR = /\x1b_pi:fc\x07([\s\S]*?)(?:\x1b_pi:\/fc\x07|$)/g;
-
-function removeSoftwareCursor(line: string, cursorMarker = ""): string {
-	return line.replace(FAKE_CURSOR, (_match, cursor: string) => {
-		const replacement = `${cursorMarker}${cursor}`;
-		cursorMarker = "";
-		return replacement;
-	});
-}
-
-function configureCursor(tui: TUI, cursorStyle: CursorStyle): void {
-	if (cursorStyle === "block") return;
-	tui.setShowHardwareCursor(true);
-	const sequence = CURSOR_STYLE_SEQUENCES[cursorStyle];
-	if (sequence) tui.terminal.write(sequence);
-}
-
+/** Rounded border row, as pi-tui-footer 1.4.8 draws it: status after `╭── `, scroll label centred. */
 function roundedBorder(
 	width: number,
 	kind: "top" | "bottom",
+	hidden: number,
 	paint: (s: string) => string,
-	sourceLine?: string,
-	indicator?: WorkingStatusIndicator,
+	status?: StatusIndicator,
 ): string {
-	if (width < 2) return paint(truncateToWidth(kind === "top" ? "╭╮" : "╰╯", width, ""));
-	const corners = kind === "top" ? (["╭", "╮"] as const) : (["╰", "╯"] as const);
+	const [l, r] = kind === "top" ? ["╭", "╮"] : ["╰", "╯"];
+	const inner = width - 2;
+	const scroll = hidden > 0 ? `${kind === "top" ? "↑" : "↓"} ${hidden} more` : undefined;
 
-	if (kind === "top" && indicator) {
-		const plain = sourceLine ? stripAnsi(sourceLine) : "";
-		const scrollMatch = plain.match(/([↑↓]\s+\d+\s+more)/);
-		const contentWidth = width - 2;
-		let status = indicator.renderInBorder(Math.max(1, contentWidth - 5));
-		let statusWidth = visibleWidth(status);
-		if (statusWidth > 0) {
-			const overflowLabel = scrollMatch ? ` ${scrollMatch[1]} ` : undefined;
-			const overflowLabelWidth = overflowLabel ? visibleWidth(overflowLabel) : 0;
-			const overflowStart = Math.floor((contentWidth - overflowLabelWidth) / 2);
-			const canFitOverflow = () => overflowLabel !== undefined
-				&& overflowLabelWidth + 2 <= contentWidth
-				&& overflowStart - (3 + statusWidth + 1) >= 1;
-			if (overflowLabel && !canFitOverflow()) {
-				status = indicator.renderSpinnerInBorder(contentWidth);
-				statusWidth = visibleWidth(status);
+	if (status) {
+		let text = status.renderInBorder(Math.max(1, inner - 5));
+		let w = visibleWidth(text);
+		if (w > 0) {
+			const label = scroll ? ` ${scroll} ` : undefined;
+			const labelW = label ? visibleWidth(label) : 0;
+			const labelAt = Math.floor((inner - labelW) / 2);
+			const fits = () => label !== undefined && labelW + 2 <= inner && labelAt - (3 + w + 1) >= 1;
+			if (label && !fits()) {
+				text = status.renderSpinnerInBorder(inner);
+				w = visibleWidth(text);
 			}
-			if (canFitOverflow()) {
-				const leftBlockWidth = 3 + statusWidth + 1;
-				return `${paint(`${corners[0]}── `)}${status}${paint(` ${"─".repeat(overflowStart - leftBlockWidth)}${overflowLabel}${"─".repeat(contentWidth - overflowStart - overflowLabelWidth)}${corners[1]}`)}`;
+			if (fits()) {
+				const lead = 3 + w + 1;
+				return `${paint(`${l}── `)}${text}${paint(` ${"─".repeat(labelAt - lead)}${label}${"─".repeat(inner - labelAt - labelW)}${r}`)}`;
 			}
-			if (contentWidth >= statusWidth + 5) {
-				return `${paint(`${corners[0]}── `)}${status}${paint(` ${"─".repeat(contentWidth - statusWidth - 4)}${corners[1]}`)}`;
-			}
-			status = indicator.renderSpinnerInBorder(contentWidth);
-			statusWidth = visibleWidth(status);
-			const prefixWidth = Math.min(3, Math.max(0, contentWidth - statusWidth));
-			return `${paint(`${corners[0]}${"─".repeat(prefixWidth)}`)}${status}${paint(`${"─".repeat(Math.max(0, contentWidth - prefixWidth - statusWidth))}${corners[1]}`)}`;
+			if (inner >= w + 5) return `${paint(`${l}── `)}${text}${paint(` ${"─".repeat(inner - w - 4)}${r}`)}`;
+			text = status.renderSpinnerInBorder(inner);
+			w = visibleWidth(text);
+			const lead = Math.min(3, Math.max(0, inner - w));
+			return `${paint(`${l}${"─".repeat(lead)}`)}${text}${paint(`${"─".repeat(Math.max(0, inner - lead - w))}${r}`)}`;
 		}
 	}
-
-	if (sourceLine) {
-		const plain = stripAnsi(sourceLine);
-		const scrollMatch = plain.match(/([↑↓]\s+\d+\s+more)/);
-		if (scrollMatch) {
-			const label = `─── ${scrollMatch[1]} `;
-			const fill = Math.max(0, width - 2 - visibleWidth(label));
-			return paint(`${corners[0]}${label}${"─".repeat(fill)}${corners[1]}`);
-		}
+	if (scroll && visibleWidth(` ${scroll} `) + 2 <= inner) {
+		const label = `─── ${scroll} `;
+		return paint(`${l}${label}${"─".repeat(Math.max(0, inner - visibleWidth(label)))}${r}`);
 	}
-
-	return paint(`${corners[0]}${"─".repeat(Math.max(0, width - 2))}${corners[1]}`);
+	return paint(`${l}${"─".repeat(Math.max(0, inner))}${r}`);
 }
 
-function trimTrailingSpaces(text: string): string {
-	const ansiSuffix = text.match(/(?:\x1b\[[0-?]*[ -/]*[@-~])+$/)?.[0] ?? "";
-	const content = ansiSuffix ? text.slice(0, -ansiSuffix.length) : text;
-	return `${content.replace(/ +$/, "")}${ansiSuffix}`;
-}
+const FRAME = 4; // "│ " + body + " │"
+// pi-tui's painted cursor (FAKE_CURSOR_START/END, not exported); truncation can drop the end marker.
+const FAKE_CURSOR = /\x1b_pi:fc\x07([\s\S]*?)(?:\x1b_pi:\/fc\x07|$)/g;
+const fill = (line: string, width: number) => {
+	const cut = truncateToWidth(line, width, "");
+	return cut + " ".repeat(Math.max(0, width - visibleWidth(cut)));
+};
 
-function inlineBorder(
-	width: number,
-	kind: "top" | "bottom",
-	paint: (s: string) => string,
-	renderLine: (width: number) => InlineFooterLine | undefined,
-	sourceLine?: string,
-	indicator?: WorkingStatusIndicator,
-): string {
-	if (width < 2) return paint(truncateToWidth(kind === "top" ? "╭╮" : "╰╯", width, ""));
-
-	const corners = kind === "top" ? (["╭", "╮"] as const) : (["╰", "╯"] as const);
-	const contentWidth = width - 2;
-	const plain = sourceLine ? stripAnsi(sourceLine) : "";
-	const scrollMatch = plain.match(/([↑↓]\s+\d+\s+more)/);
-	const right = scrollMatch ? paint(` ${scrollMatch[1]} `) : "";
-	let left = paint("─");
-
-	if (kind === "top" && indicator) {
-		const statusBudget = Math.max(1, contentWidth - visibleWidth(right) - 7);
-		let status = indicator.renderInBorder(statusBudget);
-		if (visibleWidth(status) > statusBudget) status = indicator.renderSpinnerInBorder(statusBudget);
-		const leftBudget = Math.max(0, contentWidth - visibleWidth(right) - 1);
-		status = truncateToWidth(status, Math.max(0, leftBudget - 4), "");
-		if (visibleWidth(status) > 0) left = `${paint("── ")}${status}${paint(" ")}`;
-	}
-
-	const lineBudget = Math.max(0, contentWidth - visibleWidth(left) - visibleWidth(right) - 6);
-	const line = renderLine(lineBudget);
-	if (!line) return roundedBorder(width, kind, paint, sourceLine, indicator);
-	const leftContent = trimTrailingSpaces(line.left);
-	const rightContent = trimTrailingSpaces(line.right);
-	if (visibleWidth(leftContent) === 0 && visibleWidth(rightContent) === 0) {
-		return roundedBorder(width, kind, paint, sourceLine, indicator);
-	}
-
-	const leftCell = leftContent ? ` ${leftContent} ` : "";
-	const rightCell = rightContent ? ` ${rightContent} ` : "";
-	const fill = Math.max(1, contentWidth - visibleWidth(left) - visibleWidth(leftCell) - visibleWidth(rightCell) - visibleWidth(right) - 1);
-	return `${paint(corners[0])}${left}${leftCell}${paint("─".repeat(fill))}${rightCell}${right}${paint("─")}${paint(corners[1])}`;
-}
-
-export class OpenTuiEditor extends CustomEditor {
-	readonly embedWorkingStatus = true;
-	private readonly getRail: () => string;
-	private readonly getBorder: (s: string) => string;
-	private embeddedWorkingStatusIndicator: WorkingStatusIndicator | undefined;
-	private readonly inlineFooter: InlineFooterRenderer | undefined;
-	private cursorStyle: CursorStyle;
-	private previewHardwareCursor = false;
+export class RoundedEditor extends CustomEditor {
+	private status: StatusIndicator;
+	private appliedCursor: CursorStyle | undefined;
+	/** Full width of the current pass; Editor itself renders inside the frame, so its borders get the inner width. */
+	private outer = 0;
+	private bottom = "";
 
 	constructor(
-		tui: TUI,
-		editorTheme: EditorTheme,
+		private readonly host: TUI,
+		theme: EditorTheme,
 		keybindings: KeybindingsManager,
-		cursorStyle: CursorStyle = "block",
-		inlineFooter?: InlineFooterRenderer,
+		private readonly cursorStyle: () => CursorStyle,
 	) {
-		super(tui, editorTheme, keybindings, { paddingX: 0 });
-		this.cursorStyle = cursorStyle;
-		this.inlineFooter = inlineFooter;
-		configureCursor(tui, cursorStyle);
-		// ponytail: route the frame through this.borderColor so Pi can recolor it
-		// via updateEditorBorderColor() — bash mode ("! " prefix → green) and
-		// thinking-level borders both flow through this one property.
-		this.getRail = () => this.borderColor("│");
-		this.getBorder = (s: string) => this.borderColor(s);
+		super(host, theme, keybindings, { embedWorkingStatus: true, paddingX: 0 });
 	}
 
+	/** The frame supplies the horizontal padding. */
 	override setPaddingX(_padding: number): void {
-		// The custom rail owns the horizontal inset and keeps one stable text gap.
 		super.setPaddingX(0);
 	}
 
+	override setWorkingStatusIndicator(indicator: StatusIndicator): void {
+		this.status = indicator;
+		super.setWorkingStatusIndicator(indicator);
+	}
+
+	protected override renderTopBorder(width: number, hiddenLineCount: number): string {
+		if (!this.framed()) return super.renderTopBorder(width, hiddenLineCount);
+		return roundedBorder(this.outer, "top", hiddenLineCount, this.borderColor, this.status);
+	}
+
+	protected override renderBottomBorder(width: number, hiddenLineCount: number): string {
+		if (!this.framed()) return super.renderBottomBorder(width, hiddenLineCount);
+		this.bottom = roundedBorder(this.outer, "bottom", hiddenLineCount, this.borderColor);
+		return this.bottom;
+	}
+
+	private framed(): boolean {
+		return this.outer > FRAME + 2;
+	}
+
+	override render(width: number): string[] {
+		this.applyCursor();
+		this.outer = width;
+		const base = (w: number) => {
+			const lines = super.render(w);
+			return this.cursorStyle() === "block" ? lines : lines.map((line) => line.replace(FAKE_CURSOR, "$1"));
+		};
+		if (!this.framed()) return base(width);
+		const inner = width - FRAME;
+		const lines = base(inner);
+		// [top border, body…, bottom border, autocomplete…]
+		const found = lines.indexOf(this.bottom, 1);
+		const end = found === -1 ? lines.length : found;
+		const rail = this.borderColor("│");
+		// Autocomplete rows stay as the inner render left them.
+		return lines.map((line, i) =>
+			truncateToWidth(i === 0 || i >= end ? line : `${rail} ${fill(line, inner)} ${rail}`, width, ""),
+		);
+	}
+
 	override handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
-		if (event.width < EDITOR_FRAME_HORIZONTAL_CHROME) return super.handleMouse(event);
-
-		return super.handleMouse({
-			...event,
-			x: event.x - EDITOR_FRAME_LEFT_INSET,
-			width: event.width - EDITOR_FRAME_HORIZONTAL_CHROME,
-		});
+		if (!this.framed()) return super.handleMouse(event);
+		return super.handleMouse({ ...event, x: Math.max(0, event.x - 2), width: event.width - FRAME });
 	}
 
-	setWorkingStatusIndicator(indicator: WorkingStatusIndicator | undefined): void {
-		this.embeddedWorkingStatusIndicator = indicator;
-		this.tui.requestRender();
+	/** Bar and underline come from the terminal's hardware cursor; pi's painted block is dropped above. */
+	private applyCursor(): void {
+		const style = this.cursorStyle();
+		if (style !== "block" && !this.host.getShowHardwareCursor()) this.host.setShowHardwareCursor(true);
+		if (style === this.appliedCursor) return;
+		this.host.terminal.write(style === "block" ? CURSOR_RESET : CURSOR_SEQ[style]);
+		this.appliedCursor = style;
 	}
-
-	setCursorStyle(cursorStyle: CursorStyle, blockHardwareCursor = false): void {
-		const styleChanged = cursorStyle !== this.cursorStyle;
-		this.previewHardwareCursor = cursorStyle !== "block";
-		this.cursorStyle = cursorStyle;
-		if (styleChanged) {
-			if (cursorStyle === "block") {
-				this.tui.terminal.write(DEFAULT_CURSOR_STYLE_SEQUENCE);
-				this.tui.setShowHardwareCursor(blockHardwareCursor);
-			} else {
-				configureCursor(this.tui, cursorStyle);
-			}
-		}
-		this.tui.requestRender();
-	}
-
-	private renderBase(width: number): string[] {
-		const renderedLines = super.render(width);
-		if (this.cursorStyle === "block") return renderedLines;
-
-		// Pi re-applies settings.showHardwareCursor after session_start (/reload,
-		// /new, session switches). Non-block styles have no software cursor left to
-		// fall back on, so re-assert the hardware cursor instead of losing it.
-		if (!this.tui.getShowHardwareCursor()) configureCursor(this.tui, this.cursorStyle);
-
-		// A focused overlay suppresses the editor's cursor marker. Preserve its
-		// position only for the live settings preview, then clear it on refocus.
-		let cursorMarker = this.previewHardwareCursor && !this.focused ? CURSOR_MARKER : "";
-		if (this.focused) this.previewHardwareCursor = false;
-		return renderedLines.map((line) => {
-			const rendered = removeSoftwareCursor(line, cursorMarker);
-			if (rendered !== line) cursorMarker = "";
-			return rendered;
-		});
-	}
-
-	render(width: number): string[] {
-		if (width < EDITOR_FRAME_HORIZONTAL_CHROME) return this.renderBase(width);
-
-		const rail = this.getRail();
-		const borderPaint = this.getBorder;
-		// ponytail: 1-char rail + 1-char gap on each side = 4 chars of chrome.
-		const innerWidth = Math.max(0, width - EDITOR_FRAME_HORIZONTAL_CHROME);
-		const baseLines = this.renderBase(innerWidth);
-		const bottomIdx = findBottomBorderIndex(baseLines);
-
-		const result: string[] = [];
-		const inlineFooter = this.inlineFooter?.enabled() === true;
-		const renderInlineLine = (kind: "top" | "bottom", budget: number): InlineFooterLine | undefined =>
-			this.inlineFooter?.render(budget)?.[kind];
-		result.push(inlineFooter
-			? inlineBorder(width, "top", borderPaint, (budget) => renderInlineLine("top", budget), baseLines[0], this.embeddedWorkingStatusIndicator)
-			: roundedBorder(width, "top", borderPaint, baseLines[0], this.embeddedWorkingStatusIndicator));
-
-		for (let i = 1; i < bottomIdx; i++) {
-			const line = baseLines[i] ?? "";
-			if (isEditorBorderLine(line)) {
-				result.push(`${rail} ${fillLine("", innerWidth)} ${rail}`);
-			} else {
-				result.push(`${rail} ${fillLine(line, innerWidth)} ${rail}`);
-			}
-		}
-
-		result.push(inlineFooter
-			? inlineBorder(width, "bottom", borderPaint, (budget) => renderInlineLine("bottom", budget), baseLines[bottomIdx])
-			: roundedBorder(width, "bottom", borderPaint, baseLines[bottomIdx]));
-
-		for (let i = bottomIdx + 1; i < baseLines.length; i++) {
-			result.push(baseLines[i]!);
-		}
-
-		return result.map((line) => truncateToWidth(line, width, ""));
-	}
-}
-
-type StreamWrite = (...args: unknown[]) => boolean;
-
-/**
- * Calls `requestRepaint` after each raw write to a TTY stream. Pi's fullscreen renderer only
- * rewrites changed rows, so text other extensions print straight to the terminal would
- * otherwise stay over the editor and footer until a resize.
- */
-export function repaintAfterStreamWrites(
-	requestRepaint: () => void,
-	stream: NodeJS.WriteStream = process.stderr,
-): () => void {
-	if (!stream.isTTY) return () => {};
-	const original = stream.write as unknown as StreamWrite;
-	let enabled = true;
-	const patched = ((...args: unknown[]) => {
-		const callback = typeof args[args.length - 1] === "function"
-			? (args.pop() as (error?: Error | null) => void)
-			: undefined;
-		// Repaint from the write callback so the redraw lands after the stray text.
-		return original.call(stream, ...args, (error?: Error | null) => {
-			try {
-				if (enabled) requestRepaint();
-			} catch {
-				// A failed repaint must not break the caller's write; logging it here would recurse.
-			}
-			callback?.(error);
-		});
-	}) as typeof stream.write;
-	stream.write = patched;
-	return () => {
-		enabled = false;
-		// A later wrapper may still delegate to ours; leave it as a passthrough then.
-		if (stream.write === patched) stream.write = original as unknown as typeof stream.write;
-	};
-}
-
-export function installEditor(
-	_pi: ExtensionAPI,
-	ctx: ExtensionContext,
-	cursorStyle: CursorStyle = "block",
-	inlineFooter?: InlineFooterRenderer,
-) {
-	let activeTui: TUI | undefined;
-	let activeEditor: OpenTuiEditor | undefined;
-	let previousHardwareCursor: boolean | undefined;
-	let currentCursorStyle = cursorStyle;
-	let hiddenThinkingTarget: HiddenThinkingLabelComponent | undefined;
-	let restoreHiddenThinkingRender: (() => void) | undefined;
-	let buildHiddenThinkingLabel: ((width: number) => string) | undefined;
-	const getActiveTui = (): TUI => {
-		if (!activeTui) throw new Error("Open TUI editor is not mounted");
-		return activeTui;
-	};
-	const resetHiddenThinkingTarget = (): void => {
-		restoreHiddenThinkingRender?.();
-		restoreHiddenThinkingRender = undefined;
-		hiddenThinkingTarget = undefined;
-		buildHiddenThinkingLabel = undefined;
-	};
-	// Build the label at the width Pi actually renders the message with; layout
-	// extensions (e.g. pi-sidebar) can make it much narrower than the terminal.
-	const patchHiddenThinkingRender = (target: HiddenThinkingLabelComponent): void => {
-		const originalRender = target.render;
-		let lastWidth: number | undefined;
-		let lastBuild: ((width: number) => string) | undefined;
-		let active = true;
-		const patched = function (this: HiddenThinkingLabelComponent, width: number): string[] {
-			if (!active) return originalRender.call(this, width);
-			const build = buildHiddenThinkingLabel;
-			const textWidth = hiddenThinkingTextWidth(width, this.outputPad);
-			if (build && (build !== lastBuild || textWidth !== lastWidth)) {
-				lastBuild = build;
-				lastWidth = textWidth;
-				this.setHiddenThinkingLabel(build(textWidth));
-			}
-			return originalRender.call(this, width);
-		};
-		target.render = patched;
-		restoreHiddenThinkingRender = () => {
-			active = false;
-			// Another copy of this extension may have wrapped us; unwinding then would drop its wrapper.
-			if (target.render === patched) target.render = originalRender;
-		};
-	};
-	// Only the fullscreen renderer clears and rewrites the whole screen on a forced render.
-	const restoreStderr = repaintAfterStreamWrites(() => {
-		if (activeTui?.mode === "fullscreen") activeTui.requestRender(true);
-	});
-
-	ctx.ui.setEditorComponent((tui, editorTheme, keybindings) => {
-		activeTui = tui;
-		resetHiddenThinkingTarget();
-		previousHardwareCursor = tui.getShowHardwareCursor();
-		activeEditor = new OpenTuiEditor(tui, editorTheme, keybindings, currentCursorStyle, inlineFooter);
-		return activeEditor;
-	});
-	return {
-		/** `build` receives the hidden-thinking text width and runs again whenever that width changes. */
-		setLatestHiddenThinkingLabel(build: (width: number) => string): void {
-			const tui = getActiveTui();
-			if (!hiddenThinkingTarget) {
-				hiddenThinkingTarget = findLatestHiddenThinkingLabel(tui);
-				patchHiddenThinkingRender(hiddenThinkingTarget);
-			}
-			buildHiddenThinkingLabel = build;
-			tui.requestRender();
-		},
-		resetHiddenThinkingLabelTarget: resetHiddenThinkingTarget,
-		setCursorStyle(nextCursorStyle: CursorStyle): void {
-			currentCursorStyle = nextCursorStyle;
-			activeEditor?.setCursorStyle(nextCursorStyle, previousHardwareCursor);
-		},
-		cleanup(): void {
-			restoreStderr();
-			resetHiddenThinkingTarget();
-			ctx.ui.setEditorComponent(undefined);
-			if (activeTui) {
-				if (currentCursorStyle !== "block") activeTui.terminal.write(DEFAULT_CURSOR_STYLE_SEQUENCE);
-				if (previousHardwareCursor !== undefined) activeTui.setShowHardwareCursor(previousHardwareCursor);
-			}
-		},
-	};
 }

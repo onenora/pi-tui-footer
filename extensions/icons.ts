@@ -1,6 +1,79 @@
-export type IconMode = "auto" | "nerd" | "unicode" | "ascii";
+/** Nerd Font and ASCII glyph sets. Glyphs carry their own trailing space where they need one. */
 
-export interface IconGlyphs {
+import type { Config, IconMode } from "./config.ts";
+
+export interface Glyphs {
+	cwd: string;
+	session: string;
+	git: string;
+	staged: string;
+	modified: string;
+	untracked: string;
+	model: string;
+	thinking: string;
+	working: string;
+	done: string;
+	speed: string;
+	latency: string;
+	stall: string;
+	input: string;
+	output: string;
+	cost: string;
+	context: string;
+	sep: string;
+	ellipsis: string;
+}
+
+const NERD: Glyphs = {
+	cwd: " ",
+	session: " ",
+	git: " ",
+	staged: "+",
+	modified: "!",
+	untracked: "?",
+	model: " ",
+	thinking: " ",
+	working: " ",
+	done: " ",
+	speed: "\u{F04C5} ",
+	latency: " ",
+	stall: " ",
+	input: " ",
+	output: " ",
+	cost: " ",
+	context: " ",
+	sep: " · ",
+	ellipsis: "…",
+};
+
+const ASCII: Glyphs = {
+	cwd: "@ ",
+	session: "s ",
+	git: "* ",
+	staged: "A",
+	modified: "!",
+	untracked: "?",
+	model: "M ",
+	thinking: "~",
+	working: "o ",
+	done: "+ ",
+	speed: "> ",
+	latency: "~",
+	stall: "! ",
+	input: "↑",
+	output: "↓",
+	cost: "$",
+	context: "# ",
+	sep: " | ",
+	ellipsis: "...",
+};
+
+export function glyphsFor(mode: IconMode): Glyphs {
+	return mode === "nerd" ? NERD : ASCII;
+}
+
+/** Footer glyphs, kept identical to pi-tui-footer 1.4.8. */
+export interface FooterGlyphs {
 	cwd: string;
 	host: string;
 	session: string;
@@ -15,8 +88,6 @@ export interface IconGlyphs {
 	cacheHit: string;
 	cost: string;
 	speed: string;
-	latency: string;
-	stall: string;
 	extensions: string;
 	ahead: string;
 	behind: string;
@@ -28,12 +99,9 @@ export interface IconGlyphs {
 	untracked: string;
 	renamed: string;
 	deleted: string;
-	/** Compact tool view: call marker and result gutter. */
-	toolCall: string;
-	toolResult: string;
 }
 
-const NERD_GLYPHS: IconGlyphs = {
+const FOOTER_NERD: FooterGlyphs = {
 	cwd: "",
 	host: "",
 	session: "",
@@ -43,14 +111,11 @@ const NERD_GLYPHS: IconGlyphs = {
 	context: "",
 	model: "",
 	thinking: "",
-	// client network view: input = upload to API, output = download from API
 	input: "",
 	output: "",
 	cacheHit: "",
 	cost: "",
-	speed: "󰓅",
-	latency: "",
-	stall: "",
+	speed: "\u{F04C5}",
 	extensions: "",
 	ahead: "↑",
 	behind: "↓",
@@ -62,14 +127,9 @@ const NERD_GLYPHS: IconGlyphs = {
 	untracked: "?",
 	renamed: "»",
 	deleted: "✘",
-	toolCall: "●",
-	toolResult: "⎿",
 };
 
-// ponytail: ASCII fallback uses compact symbols (not English words) to keep
-// the footer's icon-like feel on non-Nerd-Font terminals. Symbols chosen to
-// avoid collisions with the git-status set {= S ! A ? r x ^ v}.
-const ASCII_GLYPHS: IconGlyphs = {
+const FOOTER_ASCII: FooterGlyphs = {
 	cwd: "@",
 	host: "h",
 	session: "s",
@@ -84,8 +144,6 @@ const ASCII_GLYPHS: IconGlyphs = {
 	cacheHit: "c",
 	cost: "$",
 	speed: ">",
-	latency: "~",
-	stall: "!",
 	extensions: "&",
 	ahead: "^",
 	behind: "v",
@@ -97,153 +155,75 @@ const ASCII_GLYPHS: IconGlyphs = {
 	untracked: "?",
 	renamed: "r",
 	deleted: "x",
-	toolCall: "*",
-	toolResult: "`-",
 };
 
-// Portable Unicode icon set for terminals without a Nerd Font. Keeps the
-// footer icon-like instead of dropping to letters: emoji glyphs (folder,
-// branch, laptop, bulb, floppy, plug, hourglass, bolt) render through the
-// client terminal's emoji fallback at 2 columns, which matches
-// pi-tui's visibleWidth for RGI emoji; the remaining symbols are
-// single-width and covered by DejaVu Sans Mono, JetBrains Mono, Noto Sans
-// Mono and Liberation Mono. Glyph choices are easy to adjust per slot.
-const UNICODE_GLYPHS: IconGlyphs = {
-	cwd: "📁",
-	host: "⌂",
-	session: "🔖",
-	git: "🌿",
-	working: "◷",
-	done: "✓",
-	context: "≡",
-	model: "💻",
-	thinking: "💡",
-	input: "↑",
-	output: "↓",
-	cacheHit: "💾",
-	cost: "$",
-	speed: "⚡",
-	latency: "⌛",
-	stall: "⚠",
-	extensions: "🔌",
-	ahead: "↑",
-	behind: "↓",
-	diverged: "↕",
-	conflicted: "=",
-	stashed: "$",
-	modified: "!",
-	staged: "+",
-	untracked: "?",
-	renamed: "→",
-	deleted: "✗",
-	toolCall: "●",
-	toolResult: "└",
+const PRIVATE_USE = /[-\u{F0000}-\u{FFFFD}\u{100000}-\u{10FFFD}]/u;
+
+/** Kitty draws a wide Nerd icon into the blank cell after it; `spaced` reserves that cell. */
+export function spaceIcon(glyph: string): string {
+	return PRIVATE_USE.test(glyph) ? `${glyph} ` : glyph;
+}
+
+export function footerGlyphs(mode: IconMode, spaced: boolean): FooterGlyphs {
+	const base = mode === "nerd" ? FOOTER_NERD : FOOTER_ASCII;
+	if (!spaced) return base;
+	return Object.fromEntries(Object.entries(base).map(([k, v]) => [k, spaceIcon(v)])) as unknown as FooterGlyphs;
+}
+
+const RUNTIME_NERD: Record<string, string> = {
+	nodejs: "",
+	rust: "",
+	go: "",
+	python: "",
+	ruby: "",
+	java: "",
+	cpp: "",
+	c: "",
+	swift: "",
+	kotlin: "",
+	deno: "",
+	bun: "",
+	php: "",
+	elixir: "",
+	dart: "",
+	zig: "",
 };
 
-function isSshSession(): boolean {
-	return Boolean(process.env.SSH_TTY || process.env.SSH_CONNECTION);
-}
-
-export function detectNerdFont(): boolean {
-	// TTY and locale checks are the only reliable signals available here. The
-	// terminal emulator owns font selection, so auto mode is optimistic once
-	// output is an interactive UTF-8 TTY.
-	if (process.env.TERM === "dumb" || process.stdout.isTTY !== true) return false;
-	const locale = [process.env.LC_ALL, process.env.LC_CTYPE, process.env.LANG].find(Boolean);
-	return locale === undefined || /utf-?8/i.test(locale);
-}
-
-export function resolveIconMode(mode: IconMode): "nerd" | "unicode" | "ascii" {
-	if (mode === "nerd") return "nerd";
-	if (mode === "ascii") return "ascii";
-	if (mode === "unicode") return "unicode";
-	if (!detectNerdFont()) return "ascii";
-	// Auto cannot know whether the terminal that renders this session ships a
-	// Nerd Font (see #38). Local terminals usually do; SSH clients usually do
-	// not, because the font lives on the client device, so portable Unicode
-	// symbols are the safer default there. Terminals that do have a Nerd Font
-	// can opt back in with an explicit icons.mode of "nerd".
-	if (isSshSession()) return "unicode";
-	return "nerd";
-}
-
-export function resolveGlyphs(mode: IconMode): IconGlyphs {
-	const resolved = resolveIconMode(mode);
-	if (resolved === "unicode") return UNICODE_GLYPHS;
-	return resolved === "nerd" ? NERD_GLYPHS : ASCII_GLYPHS;
-}
-
-const RUNTIME_SYMBOLS: Record<string, string> = {
-	nodejs: "\uE718",
-	rust: "\uE7A8",
-	go: "\uE626",
-	python: "\uE73C",
-	ruby: "\uE739",
-	java: "\uE256",
-	cpp: "\uE61D",
-	c: "\uE61E",
-	swift: "\uE755",
-	kotlin: "\uE634",
-	deno: "\uE7FB",
-	bun: "\uE76F",
-	php: "\uE73D",
-	haskell: "\uE777",
-	julia: "\uE624",
-	lua: "\uE620",
-	elixir: "\uE62B",
-	erlang: "\uE7B1",
-	gleam: "\uE6B4",
-	crystal: "\uE62F",
-	dart: "\uE7C0",
-	nim: "\uE677",
-	zig: "\uE6A9",
-	ocaml: "\uE67A",
-	clojure: "\uE76A",
-	scala: "\uE747",
-	perl: "\uE769",
-	r: "\uE68A",
-	elm: "\uE62C",
-	haxe: "\uE7B7",
-	vagrant: "\uE21A",
-	terraform: "\uE1A5",
-};
-
-const RUNTIME_ASCII_SYMBOLS: Record<string, string> = {
+const RUNTIME_ASCII: Record<string, string> = {
 	nodejs: "node",
 	rust: "rs",
-	go: "go",
 	python: "py",
 	ruby: "rb",
-	java: "java",
-	swift: "swift",
 	kotlin: "kt",
 	cpp: "c++",
-	c: "c",
-	deno: "deno",
-	bun: "bun",
-	php: "php",
-	haskell: "hs",
-	julia: "jl",
-	lua: "lua",
 	elixir: "ex",
-	erlang: "erl",
-	gleam: "gleam",
-	crystal: "cr",
-	dart: "dart",
-	nim: "nim",
-	zig: "zig",
-	ocaml: "ml",
-	clojure: "clj",
-	scala: "scala",
-	perl: "pl",
-	r: "R",
-	elm: "elm",
-	haxe: "hx",
-	vagrant: "vag",
-	terraform: "tf",
 };
 
 export function runtimeSymbol(name: string, mode: IconMode): string {
-	if (resolveIconMode(mode) !== "nerd") return RUNTIME_ASCII_SYMBOLS[name] ?? name;
-	return RUNTIME_SYMBOLS[name] ?? "";
+	if (mode !== "nerd") return RUNTIME_ASCII[name] ?? name;
+	return RUNTIME_NERD[name] ?? "";
+}
+
+// Fonts live in the terminal that draws the screen, so these are the only signals available.
+function nerdCapable(): boolean {
+	const env = process.env;
+	if (env.TERM === "dumb" || process.stdout.isTTY !== true) return false;
+	// Over SSH the font sits on the client device, which rarely has a Nerd Font.
+	if (env.SSH_TTY || env.SSH_CONNECTION) return false;
+	const locale = env.LC_ALL || env.LC_CTYPE || env.LANG;
+	return !locale || /utf-?8/i.test(locale);
+}
+
+/** Kitty and Ghostty draw a wide Nerd icon across the blank cell that follows it. */
+function iconsSpill(): boolean {
+	const env = process.env;
+	return Boolean(env.KITTY_WINDOW_ID) || /kitty|ghostty/i.test(env.TERM ?? "") || env.TERM_PROGRAM === "ghostty";
+}
+
+/** Icon set and spacing after "auto" is resolved. */
+export function resolveIcons(config: Config): { mode: IconMode; spaced: boolean } {
+	const setting = config.icons.mode;
+	const mode: IconMode = setting === "auto" ? (nerdCapable() ? "nerd" : "ascii") : setting;
+	const spacing = config.footerSegments.nerdIconSpacing;
+	return { mode, spaced: mode === "nerd" && (spacing === "auto" ? iconsSpill() : spacing) };
 }

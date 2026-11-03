@@ -1,484 +1,449 @@
-import type { ExtensionContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
-import { hostname as osHostname } from "node:os";
+/**
+ * Status footer, laid out like pi-tui-footer 1.4.8 (ASCII glyphs shown):
+ *   @ ~/path * main [!2 ?1] node 22.1.0 + done 3s       # [##--------] 12.0% · 24k/200k
+ *   M · Anthropic · Claude Opus · ~ high        ↑ 3.1M (U 405k + R 2.7M) | ↓ 16k | $ $0.305
+ *   & extension statuses
+ */
+
+import { hostname } from "node:os";
+import { isAbsolute, relative, resolve, sep } from "node:path";
+import type {
+	ExtensionAPI,
+	ExtensionContext,
+	ReadonlyFooterDataProvider,
+	Theme,
+	ThemeColor,
+} from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import type { OpenTuiConfig } from "./config.ts";
-import type { IconGlyphs } from "./icons.ts";
-import { resolveGlyphs, resolveIconMode, runtimeSymbol } from "./icons.ts";
-import type { GitStatus } from "./git.ts";
-import type { RuntimeInfo } from "./runtime.ts";
-import type { LiveTps } from "./telemetry.ts";
-import {
-	alignRight,
-	basenamePath,
-	cacheHitColor,
-	effortColor,
-	fitSegmentsByPriority,
-	fmtTokens,
-	formatCwd,
-	formatDuration,
-	formatInputBreakdown,
-	hasAnsiStyles,
-	providerColor,
-	sanitizeStatusPreservingStyles,
-	stressColor,
-	truncateBranch,
-	truncatePath,
-	type PrioritizedSegment,
-} from "./utils.ts";
-import type { FooterState, ModelMeta, UsageTotals } from "./state.ts";
-import { getUsageTotals } from "./state.ts";
+import type { Config } from "./config.ts";
+import { fmtTokens } from "./format.ts";
+import { type FooterGlyphs, footerGlyphs, type Glyphs, glyphsFor, resolveIcons, runtimeSymbol, spaceIcon } from "./icons.ts";
+import { type GitStatus, NO_GIT, readGit, readRuntime, type Runtime, sumUsage, type Totals } from "./info.ts";
+import type { Telemetry } from "./telemetry.ts";
 
-export function shortHostname(hostname: string): string {
-	return hostname.split(".")[0] ?? "";
+// ---------------------------------------------------------------------------------------------
+// Text helpers
+
+function formatCwd(cwd: string): string {
+	const home = process.env.HOME || process.env.USERPROFILE;
+	if (!home) return cwd;
+	const rel = relative(resolve(home), resolve(cwd));
+	const inside = rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+	if (!inside) return cwd;
+	return rel === "" ? "~" : `~${sep}${rel}`;
 }
 
-// Kitty can use the blank cell after a wide Nerd icon to render the glyph.
-// With footerSegments.nerdIconSpacing, reserve an extra cell before fitting
-// footer segments. Keep Unicode/ASCII and Git flags compact.
-function spaceFooterIcon(glyph: string): string {
-	return /[\uE000-\uF8FF\u{F0000}-\u{FFFFD}\u{100000}-\u{10FFFD}]/u.test(glyph)
-		? `${glyph} `
-		: glyph;
+const basenamePath = (path: string) => path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
+
+/** Branches lose their tail so prefixes like `fix/` stay visible. */
+function truncateBranch(branch: string, max: number): string {
+	if (branch.length <= max) return branch;
+	return max <= 3 ? "...".slice(0, max) : `${branch.slice(0, max - 3)}...`;
 }
 
-function renderBar(theme: Theme, pct: number, barWidth: number, ascii: boolean): string {
-	const filled = Math.max(0, Math.min(barWidth, Math.round((pct / 100) * barWidth)));
-	const empty = barWidth - filled;
-	const color = stressColor(pct);
-	// Use small centered square blocks (▪/▫) instead of full-height
-	// █/░ so the bar's visual height matches the surrounding [ ] brackets.
-	const filledCell = ascii ? "#" : "▪";
-	const emptyCell = ascii ? "-" : "▫";
-	return (
-		theme.fg("dim", "[") +
-		theme.fg(color, filledCell.repeat(filled)) +
-		theme.fg("dim", emptyCell.repeat(empty)) +
-		theme.fg("dim", "]")
-	);
+/** Keeps the first segment (`~`) and as many trailing segments as fit, in display columns. */
+function truncatePath(path: string, max: number): string {
+	if (visibleWidth(path) <= max) return path;
+	if (max <= 3) return "...".slice(0, max);
+	const sepChar = path.includes("/") ? "/" : "\\";
+	const parts = path.split(/[\\/]/);
+	if (parts.length <= 2) return truncateToWidth(path, max, "...");
+	const tail: string[] = [];
+	let used = 0;
+	for (let i = parts.length - 1; i >= 1; i--) {
+		const w = visibleWidth(parts[i]!);
+		if (used + w + 4 > max) break;
+		tail.unshift(parts[i]!);
+		used += w + 1;
+	}
+	const result = `${parts[0]}${sepChar}...${sepChar}${tail.join(sepChar)}`;
+	return visibleWidth(result) > max ? truncateToWidth(result, max, "...") : result;
 }
 
-/** Compact context form: icon + percentage, no bar or token counts. */
-function renderContextCompact(theme: Theme, ctx: ExtensionContext, glyphs: IconGlyphs): string {
-	const contextUsage = ctx.getContextUsage();
-	const contextWindow = contextUsage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
-	if (contextWindow <= 0) return "";
-	const contextPct = contextUsage?.percent ?? 0;
-	return `${theme.fg(stressColor(contextPct), glyphs.context)} ${theme.fg(stressColor(contextPct), `${contextPct.toFixed(1)}%`)}`;
+function formatDuration(ms: number): string {
+	const total = Math.max(0, Math.floor(ms / 1000));
+	if (total < 60) return `${total}s`;
+	const s = total % 60;
+	const minutes = Math.floor(total / 60);
+	if (minutes < 60) return `${minutes}m ${s}s`;
+	return `${Math.floor(minutes / 60)}h ${minutes % 60}m ${s}s`;
 }
 
-function renderGitSegment(
-	theme: Theme,
-	git: GitStatus,
-	glyphs: IconGlyphs,
-	segments: OpenTuiConfig["footerSegments"],
-	maxBranchLen = 20,
-): string {
+function formatInput(uncached: number, cacheRead: number): string {
+	const total = fmtTokens(uncached + cacheRead);
+	return cacheRead > 0 ? `${total} (U ${fmtTokens(uncached)} + R ${fmtTokens(cacheRead)})` : total;
+}
+
+function alignRight(left: string, right: string, width: number, theme: Theme): string {
+	if (visibleWidth(right) > width) right = truncateToWidth(right, width, theme.fg("dim", "..."));
+	const rightW = visibleWidth(right);
+	const pad = width - visibleWidth(left) - rightW;
+	if (pad >= 1) return left + " ".repeat(pad) + right;
+	const room = Math.max(0, width - rightW - 1);
+	const fitted = room > 0 ? truncateToWidth(left, room, theme.fg("dim", "...")) : "";
+	return fitted ? `${fitted} ${right}` : right;
+}
+
+interface Segment {
+	text: string;
+	/** Higher survives longer. */
+	priority: number;
+	/** Swapped in before anything is truncated or dropped. */
+	compact?: string;
+	truncate?: (maxWidth: number, ellipsis: string) => string;
+}
+
+/**
+ * Packs space-separated segments into `maxW`: compact forms first, then the lowest priority
+ * shrinks and goes. Returns one text per segment, "" for dropped ones.
+ */
+function fitSegments(segs: readonly Segment[], maxW: number, ellipsis: string): string[] {
+	const items = segs.map((s) => ({ ...s, w: visibleWidth(s.text) }));
+	const total = () => {
+		const live = items.filter((it) => it.text);
+		return live.reduce((a, it) => a + it.w, 0) + Math.max(0, live.length - 1);
+	};
+	const lowest = () => {
+		let at = -1;
+		for (let i = 0; i < items.length; i++) {
+			if (items[i]!.text && (at === -1 || items[i]!.priority < items[at]!.priority)) at = i;
+		}
+		return at;
+	};
+	if (total() > maxW) {
+		for (const it of items) {
+			if (it.compact === undefined || visibleWidth(it.compact) >= it.w) continue;
+			it.text = it.compact;
+			it.w = visibleWidth(it.text);
+			if (total() <= maxW) break;
+		}
+	}
+	// A truncate that cannot shrink must not spin: no progress drops the lowest segment.
+	let last = Infinity;
+	while (total() > maxW) {
+		const now = total();
+		const target = lowest();
+		if (target === -1) break;
+		const it = items[target]!;
+		if (now >= last) {
+			it.text = "";
+			it.w = 0;
+			continue;
+		}
+		last = now;
+		const others = items.filter((o, i) => i !== target && o.text);
+		const otherW = others.reduce((a, o) => a + o.w, 0) + Math.max(0, others.length - 1);
+		const avail = maxW - otherW - (others.length > 0 ? 1 : 0);
+		if (avail <= visibleWidth(ellipsis)) {
+			it.text = "";
+			it.w = 0;
+		} else if (avail < it.w) {
+			it.text = it.truncate ? it.truncate(avail, ellipsis) : truncateToWidth(it.text, avail, ellipsis);
+			it.w = visibleWidth(it.text);
+		} else break;
+	}
+	return items.map((it) => it.text);
+}
+
+const stressColor = (pct: number): ThemeColor => (pct >= 90 ? "error" : pct >= 70 ? "warning" : "accent");
+const cacheHitColor = (pct: number): ThemeColor => (pct < 30 ? "error" : pct < 70 ? "warning" : "success");
+
+function providerColor(provider: string): ThemeColor {
+	switch (provider.toLowerCase()) {
+		case "anthropic":
+			return "accent";
+		case "openai":
+		case "openai-codex":
+			return "success";
+		case "google":
+		case "google-vertex":
+			return "warning";
+		case "amazon-bedrock":
+			return "thinkingHigh";
+		case "github-copilot":
+			return "mdLink";
+		case "deepseek":
+			return "thinkingLow";
+		case "xai":
+		case "groq":
+			return "error";
+		default:
+			return "muted";
+	}
+}
+
+const EFFORT_COLOR: Record<string, ThemeColor> = {
+	minimal: "thinkingMinimal",
+	low: "thinkingLow",
+	medium: "thinkingMedium",
+	high: "thinkingHigh",
+	xhigh: "thinkingXhigh",
+};
+
+// SGR carries colours and stays; every other escape or control character becomes a space.
+const STATUS_TOKEN =
+	/(?:\x1b\[|\x9b)[0-?]*[ -/]*m|(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]|(?:\x1bP|\x90|\x1bX|\x98|\x1b\^|\x9e|\x1b_|\x9f)[\s\S]*?(?:\x1b\\|\x9c|$)|(?:\x1b\]|\x9d)[\s\S]*?(?:\x07|\x1b\\|\x9c|$)|\x1b[@-Z\\_]|[\u0000-\u001f\u007f-\u009f]/g;
+const SGR_TOKEN = /^(?:\x1b\[|\x9b)[0-9;:]*m$/;
+const SGR = /(?:\x1b\[|\x9b)[0-9;:]*m/;
+
+const cleanStatus = (text: string) =>
+	text
+		.replace(STATUS_TOKEN, (t) => (SGR_TOKEN.test(t) ? t : " "))
+		.replace(/ {2,}/g, " ")
+		.trim();
+
+// ---------------------------------------------------------------------------------------------
+// Segments
+
+function gitSegment(theme: Theme, git: GitStatus, g: FooterGlyphs, on: Config["footerSegments"]): string {
 	const parts: string[] = [];
-	if (segments.gitBranch) {
+	if (on.gitBranch) {
 		if (git.branch) {
-			parts.push(theme.fg("mdLink", glyphs.git));
-			parts.push(theme.fg("mdLink", truncateBranch(git.branch, maxBranchLen)));
-		} else if (git.commit?.detached) {
-			parts.push(theme.fg("warning", glyphs.git));
-			parts.push(theme.fg("warning", "HEAD"));
-			if (git.commit.oid) {
-				const shortHash = git.commit.oid.slice(0, 7);
-				const tag = git.commit.tag ? ` ${git.commit.tag}` : "";
-				parts.push(theme.fg("dim", `${shortHash}${tag}`));
-			}
+			parts.push(theme.fg("mdLink", g.git), theme.fg("mdLink", truncateBranch(git.branch, 20)));
+		} else if (git.detached) {
+			parts.push(theme.fg("warning", g.git), theme.fg("warning", "HEAD"));
+			const { oid, tag } = git.detached;
+			if (oid) parts.push(theme.fg("dim", `${oid.slice(0, 7)}${tag ? ` ${tag}` : ""}`));
 		}
 	}
-
-	if (segments.gitStatus) {
-		const statusIcons: string[] = [];
-		// ponytail: always show count — `!1` not `!`, so 1 vs 100 is distinguishable.
-		const addStatus = (count: number, glyph: string, color: ThemeColor) => {
-			if (count > 0) statusIcons.push(theme.fg(color, `${glyph}${count}`));
+	if (on.gitStatus) {
+		const icons: string[] = [];
+		const add = (n: number, glyph: string, color: ThemeColor) => {
+			if (n > 0) icons.push(theme.fg(color, `${glyph}${n}`));
 		};
-		addStatus(git.conflicted, glyphs.conflicted, "error");
-		addStatus(git.deleted, glyphs.deleted, "error");
-		addStatus(git.modified, glyphs.modified, "warning");
-		addStatus(git.renamed, glyphs.renamed, "warning");
-		addStatus(git.staged, glyphs.staged, "success");
-		addStatus(git.untracked, glyphs.untracked, "muted");
-		addStatus(git.stashed, glyphs.stashed, "muted");
-
-		if (git.ahead > 0 && git.behind > 0) {
-			statusIcons.push(theme.fg("warning", `${glyphs.diverged}${git.ahead}/${git.behind}`));
-		} else if (git.ahead > 0) {
-			statusIcons.push(theme.fg("success", `${glyphs.ahead}${git.ahead}`));
-		} else if (git.behind > 0) {
-			statusIcons.push(theme.fg("warning", `${glyphs.behind}${git.behind}`));
-		}
-
-		const statusBlock = statusIcons.join(" ");
-		if (statusBlock) {
-			parts.push(`${theme.fg("dim", "[")}${statusBlock}${theme.fg("dim", "]")}`);
-		}
+		add(git.conflicted, g.conflicted, "error");
+		add(git.deleted, g.deleted, "error");
+		add(git.modified, g.modified, "warning");
+		add(git.renamed, g.renamed, "warning");
+		add(git.staged, g.staged, "success");
+		add(git.untracked, g.untracked, "muted");
+		add(git.stashed, g.stashed, "muted");
+		if (git.ahead > 0 && git.behind > 0) icons.push(theme.fg("warning", `${g.diverged}${git.ahead}/${git.behind}`));
+		else if (git.ahead > 0) icons.push(theme.fg("success", `${g.ahead}${git.ahead}`));
+		else if (git.behind > 0) icons.push(theme.fg("warning", `${g.behind}${git.behind}`));
+		if (icons.length) parts.push(`${theme.fg("dim", "[")}${icons.join(" ")}${theme.fg("dim", "]")}`);
 	}
-
 	return parts.join(" ");
 }
 
-function renderRuntimeSegment(
-	theme: Theme,
-	runtime: RuntimeInfo | null,
-	iconMode: OpenTuiConfig["icons"]["mode"],
-	spaceIcon: boolean,
-): string {
-	if (!runtime) return "";
-	const glyph = runtimeSymbol(runtime.name, iconMode);
-	const symbol = theme.fg("success", spaceIcon ? spaceFooterIcon(glyph) : glyph);
-	const version = runtime.version ? theme.fg("muted", runtime.version) : "";
-	const label = [symbol, version].filter(Boolean).join(" ");
-	return label;
-}
-
-function renderTimerSegment(theme: Theme, state: FooterState, glyphs: IconGlyphs): string {
-	if (state.workingSince !== undefined) {
-		return `${theme.fg("accent", glyphs.working)} ${theme.fg("dim", "working")} ${theme.fg("accent", formatDuration(Date.now() - state.workingSince))}`;
-	}
-	if (state.lastDoneIn !== undefined) {
-		return `${theme.fg("success", glyphs.done)} ${theme.fg("success", "done")} ${theme.fg("text", formatDuration(state.lastDoneIn))}`;
-	}
-	return "";
-}
-
-function renderContextBar(
+/** Full context bar, and the icon + percentage form it falls back to. */
+function contextSegment(
 	theme: Theme,
 	ctx: ExtensionContext,
 	width: number,
-	glyphs: IconGlyphs,
-	iconMode: OpenTuiConfig["icons"]["mode"],
-): string {
-	const contextUsage = ctx.getContextUsage();
-	const contextWindow = contextUsage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
-	const contextTokens = contextUsage?.tokens ?? 0;
-	const contextPct = contextUsage?.percent ?? 0;
-
-	// ponytail: render 0% bar once we know the window — keeps the right side
-	// populated instead of collapsing everything left in an empty session.
-	if (contextWindow <= 0) return "";
-
-	const pctText = theme.fg(stressColor(contextPct), `${contextPct.toFixed(1)}%`);
-	const ctxText = `${theme.fg("text", fmtTokens(contextTokens))}${theme.fg("dim", "/")}${theme.fg("text", fmtTokens(contextWindow))}`;
-	const contextIcon = theme.fg(stressColor(contextPct), glyphs.context);
-	// Cap the bar at `width - reserved` (with a floor of 4) so the full form
-	// never forces the left segments out before compact/drop logic kicks in.
-	const reserved = visibleWidth(contextIcon) + visibleWidth(pctText) + visibleWidth(ctxText) + 5 + 2;
+	g: FooterGlyphs,
+	ascii: boolean,
+): { full: string; compact: string } | undefined {
+	const usage = ctx.getContextUsage();
+	const window = usage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
+	// Shown at 0% once the window is known, so the right side never collapses.
+	if (window <= 0) return undefined;
+	const pct = usage?.percent ?? 0;
+	const color = stressColor(pct);
+	const icon = theme.fg(color, g.context);
+	const pctText = theme.fg(color, `${pct.toFixed(1)}%`);
+	const size = `${theme.fg("text", fmtTokens(usage?.tokens ?? 0))}${theme.fg("dim", "/")}${theme.fg("text", fmtTokens(window))}`;
+	// The bar gives way before the left segments are squeezed.
+	const reserved = visibleWidth(icon) + visibleWidth(pctText) + visibleWidth(size) + 7;
 	const barWidth = Math.max(4, Math.min(12, width - reserved));
-	return `${contextIcon} ${renderBar(theme, contextPct, barWidth, resolveIconMode(iconMode) === "ascii")} ${pctText} ${theme.fg("dim", "·")} ${ctxText}`;
+	const filled = Math.max(0, Math.min(barWidth, Math.round((pct / 100) * barWidth)));
+	// ▪/▫ sit at the height of the brackets, unlike full blocks.
+	const bar =
+		theme.fg("dim", "[") +
+		theme.fg(color, (ascii ? "#" : "▪").repeat(filled)) +
+		theme.fg("dim", (ascii ? "-" : "▫").repeat(barWidth - filled)) +
+		theme.fg("dim", "]");
+	return {
+		full: `${icon} ${bar} ${pctText} ${theme.fg("dim", "·")} ${size}`,
+		compact: `${icon} ${pctText}`,
+	};
 }
 
-function renderStatsBlock(
-	theme: Theme,
-	totals: UsageTotals,
-	glyphs: IconGlyphs,
-	segments: OpenTuiConfig["footerSegments"],
-): string {
+function statsBlock(theme: Theme, t: Totals, g: FooterGlyphs, on: Config["footerSegments"]): string {
 	const stats: string[] = [];
-	if (segments.tokens) {
-		stats.push(theme.fg("accent", `${glyphs.input} ${formatInputBreakdown(totals.input, totals.cacheRead)}`));
-		stats.push(theme.fg("success", `${glyphs.output} ${fmtTokens(totals.output)}`));
-		// ponytail: hide cache-hit rate when the provider never reported cache
-		// tokens — avoids a misleading "0%" on providers without prompt caching.
-		const hasCacheTokens = totals.cacheRead > 0 || totals.cacheWrite > 0;
-		if (hasCacheTokens && totals.latestCacheHitRate !== undefined) {
-			stats.push(theme.fg(cacheHitColor(totals.latestCacheHitRate), `${glyphs.cacheHit} ${totals.latestCacheHitRate.toFixed(1)}%`));
+	if (on.tokens) {
+		stats.push(theme.fg("accent", `${g.input} ${formatInput(t.input, t.cacheRead)}`));
+		stats.push(theme.fg("success", `${g.output} ${fmtTokens(t.output)}`));
+		// No cache tokens at all means the provider has no prompt cache; a "0%" would mislead.
+		if ((t.cacheRead > 0 || t.cacheWrite > 0) && t.latestCacheHitRate !== undefined) {
+			stats.push(theme.fg(cacheHitColor(t.latestCacheHitRate), `${g.cacheHit} ${t.latestCacheHitRate.toFixed(1)}%`));
 		}
 	}
-	if (segments.cost) {
-		stats.push(theme.fg("warning", `${glyphs.cost} $${totals.cost.toFixed(3)}`));
-	}
-
+	if (on.cost) stats.push(theme.fg("warning", `${g.cost} $${t.cost.toFixed(3)}`));
 	return stats.join(` ${theme.fg("dim", "|")} `);
 }
 
-const ANSI_RESET = "\x1b[0m";
+// ---------------------------------------------------------------------------------------------
 
-/**
- * Keep the colours an extension applied to its own status text. Plain text stays
- * muted so unstyled statuses keep the quiet footer look. The trailing reset
- * stops an unclosed style from tinting the separator and the next status.
- */
-function renderStatusText(theme: Theme, status: string): string {
-	if (!hasAnsiStyles(status)) return theme.fg("muted", status);
-	return `${status}${ANSI_RESET}`;
-}
+export class FooterInfo {
+	data: ReadonlyFooterDataProvider | undefined;
+	runStart: number | undefined;
+	lastRunMs: number | undefined;
+	private git: GitStatus = NO_GIT;
+	private runtime: Runtime | null = null;
+	private totalsCache: { key: string; totals: Totals } | undefined;
+	private gitBusy = false;
+	private gitQueued: string | undefined;
 
-function renderExtensionStatusLines(
-	theme: Theme,
-	extensionStatuses: ReadonlyMap<string, string>,
-	glyphs: IconGlyphs,
-	width: number,
-): string[] {
-	const statuses = Array.from(extensionStatuses.entries())
-		.sort(([a], [b]) => a.localeCompare(b))
-		.map(([, text]) => sanitizeStatusPreservingStyles(text))
-		.filter((text) => text.length > 0);
-	if (statuses.length === 0) return [];
+	constructor(
+		private readonly pi: ExtensionAPI,
+		private readonly config: () => Config,
+		private readonly telemetry: Telemetry,
+		private readonly redraw: () => void,
+	) {}
 
-	const separator = ` ${theme.fg("dim", "|")} `;
-	const statusText = statuses.map((status) => renderStatusText(theme, status)).join(separator);
-	const line = `${theme.fg("mdLink", glyphs.extensions)} ${statusText}`;
-	return wrapTextWithAnsi(line, width);
-}
-
-export interface FooterHooks {
-	setRequestRender: (fn: (() => void) | undefined) => void;
-	scheduleGitRefresh: () => void;
-	getLiveTps?: () => LiveTps | null;
-}
-
-interface FooterDataLike {
-	getExtensionStatuses(): ReadonlyMap<string, string>;
-}
-
-export interface InlineFooterLine {
-	left: string;
-	right: string;
-}
-
-export interface InlineFooterLines {
-	top: InlineFooterLine;
-	bottom: InlineFooterLine;
-}
-
-/**
- * Split the bottom border content the way `alignRight` splits the plain row:
- * the right block (statistics) survives, the left one (model) shrinks to an
- * ellipsis and only then disappears. Keeps the assembled border inside its
- * budget so editor-side truncation never eats the right corner.
- */
-function fitInlineLine(left: string, right: string, width: number, theme: Theme): InlineFooterLine {
-	const rightWidth = visibleWidth(right);
-	if (rightWidth > width) {
-		return { left: "", right: truncateToWidth(right, width, theme.fg("dim", "...")) };
-	}
-	const availableForLeft = width - rightWidth - 1;
-	if (availableForLeft <= 0) return { left: "", right };
-	return { left: truncateToWidth(left, availableForLeft, theme.fg("dim", "...")), right };
-}
-
-export interface FooterHandle {
-	renderInline(width: number): InlineFooterLines | undefined;
-	cleanup(): void;
-}
-
-function fitInlineSegments(
-	parts: readonly PrioritizedSegment[],
-	width: number,
-	theme: Theme,
-): string {
-	const separator = theme.fg("dim", " · ");
-	const separatorReserve = Math.max(0, parts.length - 1) * Math.max(0, visibleWidth(separator) - 1);
-	return fitSegmentsByPriority(
-		parts,
-		Math.max(0, width - separatorReserve),
-		theme.fg("dim", "..."),
-	).join(separator);
-}
-
-function renderFooterContent(
-	ctx: ExtensionContext,
-	getState: () => FooterState,
-	getConfig: () => OpenTuiConfig,
-	getModelMeta: () => ModelMeta,
-	theme: Theme,
-	footerData: FooterDataLike,
-	width: number,
-	getLiveTps: () => LiveTps | null,
-): { mainLines: [string, string]; inlineLines: InlineFooterLines; extensionLines: string[] } {
-	if (width <= 0) {
-		return {
-			mainLines: ["", ""],
-			inlineLines: {
-				top: { left: "", right: "" },
-				bottom: { left: "", right: "" },
-			},
-			extensionLines: [],
-		};
+	reset(): void {
+		this.totalsCache = undefined;
+		this.runStart = undefined;
+		this.lastRunMs = undefined;
 	}
 
-	const state = getState();
-	const config = getConfig();
-	const segments = config.footerSegments;
-	const glyphs = { ...resolveGlyphs(config.icons.mode) };
-	if (segments.nerdIconSpacing) {
-		for (const key of Object.keys(glyphs) as (keyof IconGlyphs)[]) {
-			glyphs[key] = spaceFooterIcon(glyphs[key]);
+	// A request that arrives mid-flight runs once more afterwards, so the last change always lands.
+	async refreshGit(cwd: string): Promise<void> {
+		if (this.gitBusy) {
+			this.gitQueued = cwd;
+			return;
 		}
-	}
-	const meta = getModelMeta();
-	const totals = getUsageTotals(ctx);
-
-	const leftParts: PrioritizedSegment[] = [];
-	const inlineTopLeftParts: PrioritizedSegment[] = [];
-	const inlineTopRightParts: PrioritizedSegment[] = [];
-	if (segments.cwd) {
-		const maxCwd = Math.min(30, Math.max(10, Math.floor(width * 0.4)));
-		const cwd = formatCwd(ctx.sessionManager.getCwd());
-		const cwdPrefix = `${theme.fg("mdLink", glyphs.cwd)} `;
-		const accent = (text: string) => theme.fg("accent", text);
-		leftParts.push({
-			text: `${cwdPrefix}${accent(truncatePath(cwd, maxCwd))}`,
-			compactText: `${cwdPrefix}${accent(truncatePath(basenamePath(cwd), maxCwd))}`,
-			priority: 0,
-			truncate: (_text, maxWidth, ellipsis) => {
-				const pathWidth = maxWidth - visibleWidth(cwdPrefix);
-				if (pathWidth <= visibleWidth(ellipsis)) {
-					return truncateToWidth(`${cwdPrefix}${accent(basenamePath(cwd))}`, maxWidth, ellipsis);
-				}
-				return `${cwdPrefix}${accent(truncatePath(basenamePath(cwd), pathWidth))}`;
-			},
-		});
-		inlineTopRightParts.push(leftParts.at(-1)!);
-	}
-	if (segments.hostname) {
-		const shortHost = shortHostname(osHostname());
-		if (shortHost) {
-			leftParts.push({
-				text: `${theme.fg("dim", glyphs.host)} ${theme.fg("accent", shortHost)}`,
-				priority: 1,
+		this.gitBusy = true;
+		try {
+			const on = this.config().footerSegments;
+			this.git = await readGit(this.pi, cwd, {
+				counts: on.gitStatus,
+				commit: on.gitBranch,
+				tag: on.gitBranch && on.gitCommit,
 			});
-			inlineTopRightParts.push(leftParts.at(-1)!);
+		} finally {
+			this.gitBusy = false;
 		}
+		this.redraw();
+		const next = this.gitQueued;
+		this.gitQueued = undefined;
+		if (next !== undefined) await this.refreshGit(next);
 	}
-	const sessionName = ctx.sessionManager.getSessionName();
-	if (sessionName) {
-		const sessionPart: PrioritizedSegment = {
-			text: `${theme.fg("dim", glyphs.session)} ${theme.fg("text", truncateToWidth(sessionName, 24, theme.fg("dim", "...")))}`,
-			priority: 2,
-		};
-		if (segments.sessionName) {
-			leftParts.push(sessionPart);
-			inlineTopLeftParts.push(sessionPart);
+
+	async refreshRuntime(cwd: string): Promise<void> {
+		this.runtime = await readRuntime(this.pi, cwd);
+		this.redraw();
+	}
+
+	// Entries are append-only and every append moves the leaf, so session + leaf identify the totals.
+	private totals(ctx: ExtensionContext): Totals {
+		const sm = ctx.sessionManager;
+		const key = `${sm.getSessionId()}:${sm.getLeafId() ?? ""}`;
+		if (this.totalsCache?.key !== key) this.totalsCache = { key, totals: sumUsage(ctx) };
+		return this.totalsCache.totals;
+	}
+
+	/** Glyphs for the header and the run summary. */
+	glyphs(): Glyphs {
+		return glyphsFor(resolveIcons(this.config()).mode);
+	}
+
+	render(ctx: ExtensionContext, theme: Theme, width: number): string[] {
+		if (width <= 0) return [""];
+		const config = this.config();
+		const on = config.footerSegments;
+		const { mode, spaced } = resolveIcons(config);
+		const g = footerGlyphs(mode, spaced);
+		const ellipsis = theme.fg("dim", "...");
+
+		// Line 1: where, git, runtime, timer; context bar on the right.
+		const left: Segment[] = [];
+		if (on.cwd) {
+			const cwd = formatCwd(ctx.cwd);
+			const prefix = `${theme.fg("mdLink", g.cwd)} `;
+			const path = (text: string) => prefix + theme.fg("accent", text);
+			const max = Math.min(30, Math.max(10, Math.floor(width * 0.4)));
+			left.push({
+				text: path(truncatePath(cwd, max)),
+				compact: path(truncatePath(basenamePath(cwd), max)),
+				priority: 4,
+				truncate: (maxWidth, ell) => {
+					const room = maxWidth - visibleWidth(prefix);
+					if (room <= visibleWidth(ell)) return truncateToWidth(path(basenamePath(cwd)), maxWidth, ell);
+					return path(truncatePath(basenamePath(cwd), room));
+				},
+			});
 		}
-	}
-	const gitSeg = renderGitSegment(theme, state.git, glyphs, segments);
-	if (gitSeg) {
-		leftParts.push({ text: gitSeg, priority: 3 });
-		inlineTopLeftParts.push(leftParts.at(-1)!);
-	}
-	if (segments.runtime) {
-		const runtimeSeg = renderRuntimeSegment(theme, state.runtime, config.icons.mode, segments.nerdIconSpacing);
-		if (runtimeSeg) {
-			leftParts.push({ text: runtimeSeg, priority: 4 });
-			inlineTopRightParts.push(leftParts.at(-1)!);
+		if (on.hostname) {
+			const host = hostname().split(".")[0];
+			if (host) left.push({ text: `${theme.fg("dim", g.host)} ${theme.fg("accent", host)}`, priority: 3 });
 		}
-	}
-	const timerSeg = renderTimerSegment(theme, state, glyphs);
-	if (timerSeg) {
-		const liveTps = state.workingSince !== undefined && segments.liveTps
-			? getLiveTps()
-			: null;
-		const text = liveTps === null
-			? timerSeg
-			: `${timerSeg} ${theme.fg("dim", "·")} ${theme.fg(liveTps.stale ? "dim" : "accent", `${glyphs.speed} ~${Math.round(liveTps.tps)} tok/s`)}`;
-		// Narrow widths shed the live TPS before the timer itself.
-		leftParts.push({ text, compactText: liveTps === null ? undefined : timerSeg, priority: 1 });
-		inlineTopRightParts.push(leftParts.at(-1)!);
-	}
-
-	// The context bar competes with the left segments for the same row:
-	// full bar first, then the compact icon+pct form, then dropped.
-	let contextText = "";
-	let contextCompact: string | undefined;
-	if (segments.context) {
-		contextText = renderContextBar(theme, ctx, width, glyphs, config.icons.mode);
-		const compact = renderContextCompact(theme, ctx, glyphs);
-		if (compact && visibleWidth(compact) < visibleWidth(contextText)) {
-			contextCompact = compact;
+		const name = on.sessionName ? this.pi.getSessionName() : undefined;
+		if (name) {
+			left.push({
+				text: `${theme.fg("dim", g.session)} ${theme.fg("text", truncateToWidth(name, 24, ellipsis))}`,
+				priority: 2,
+			});
 		}
+		const git = gitSegment(theme, this.git, g, on);
+		if (git) left.push({ text: git, priority: 1 });
+		if (on.runtime && this.runtime) {
+			const glyph = runtimeSymbol(this.runtime.name, mode);
+			const symbol = theme.fg("success", spaced ? spaceIcon(glyph) : glyph);
+			const version = this.runtime.version ? theme.fg("muted", this.runtime.version) : "";
+			left.push({ text: [symbol, version].filter(Boolean).join(" "), priority: 0 });
+		}
+		let timer = "";
+		if (this.runStart !== undefined) {
+			timer = `${theme.fg("accent", g.working)} ${theme.fg("dim", "working")} ${theme.fg("accent", formatDuration(Date.now() - this.runStart))}`;
+		} else if (this.lastRunMs !== undefined) {
+			timer = `${theme.fg("success", g.done)} ${theme.fg("success", "done")} ${theme.fg("text", formatDuration(this.lastRunMs))}`;
+		}
+		if (timer) {
+			const tps = this.runStart !== undefined && on.liveTps ? this.telemetry.liveTps() : undefined;
+			const text = tps
+				? `${timer} ${theme.fg("dim", "·")} ${theme.fg(tps.stale ? "dim" : "accent", `${g.speed} ~${Math.round(tps.tps)} tok/s`)}`
+				: timer;
+			// Narrow widths shed the live TPS before the timer.
+			left.push({ text, compact: tps ? timer : undefined, priority: 3 });
+		}
+
+		const context = on.context ? contextSegment(theme, ctx, width, g, mode === "ascii") : undefined;
+		const all = [...left];
+		if (context) {
+			const compact = visibleWidth(context.compact) < visibleWidth(context.full) ? context.compact : undefined;
+			// Goes with the runtime, before git, session, host, timer and cwd.
+			all.push({ text: context.full, compact, priority: 0 });
+		}
+		const fitted = fitSegments(all, width, ellipsis);
+		const right = context ? (fitted.pop() ?? "") : "";
+		const line1 = alignRight(fitted.filter(Boolean).join(" "), right, width, theme);
+
+		// Line 2: model on the left, usage on the right; the model gives way first.
+		const model = ctx.model;
+		const provider = on.provider && model?.provider
+			? model.provider.charAt(0).toUpperCase() + model.provider.slice(1)
+			: undefined;
+		const modelParts = [theme.fg("mdLink", g.model)];
+		if (provider) modelParts.push(theme.fg(providerColor(model?.provider ?? ""), provider));
+		modelParts.push(theme.fg("text", model?.name ?? model?.id ?? "no-model"));
+		const effort = model?.reasoning ? this.pi.getThinkingLevel() : undefined;
+		if (effort && effort !== "off") {
+			modelParts.push(theme.fg(EFFORT_COLOR[effort] ?? "thinkingMedium", `${g.thinking} ${effort}`));
+		}
+		const modelBlock = modelParts.join(theme.fg("dim", " · "));
+		let stats = statsBlock(theme, this.totals(ctx), g, on);
+		let modelFit = "";
+		if (visibleWidth(stats) > width) stats = truncateToWidth(stats, width, ellipsis);
+		else if (width - visibleWidth(stats) - 1 > 0) {
+			modelFit = truncateToWidth(modelBlock, width - visibleWidth(stats) - 1, ellipsis);
+		}
+		const line2 = alignRight(modelFit, stats, width, theme);
+
+		const lines = [line1, line2].map((line) => truncateToWidth(line, width, ellipsis));
+
+		if (on.extensionStatuses) {
+			const statuses = [...(this.data?.getExtensionStatuses().entries() ?? [])]
+				.sort(([a], [b]) => a.localeCompare(b))
+				.map(([, text]) => cleanStatus(text))
+				.filter(Boolean)
+				// Plain text stays muted; a trailing reset keeps a status's own style from leaking.
+				.map((text) => (SGR.test(text) ? `${text}\x1b[0m` : theme.fg("muted", text)));
+			if (statuses.length) {
+				lines.push(...wrapTextWithAnsi(`${theme.fg("mdLink", g.extensions)} ${statuses.join(` ${theme.fg("dim", "|")} `)}`, width));
+			}
+		}
+		return lines;
 	}
-	const allParts: PrioritizedSegment[] = [...leftParts];
-	if (contextText) {
-		// ponytail: priority 4 = sheds with runtime, before git/timer/cwd.
-		allParts.push({ text: contextText, compactText: contextCompact, priority: 4 });
-		// Context stays at the far right; cwd is the first item in this group.
-		inlineTopRightParts.push({ text: contextText, compactText: contextCompact, priority: 4 });
-	}
-
-	const fitted = fitSegmentsByPriority(allParts, width, theme.fg("dim", "..."));
-	const fittedContext = contextText ? fitted.pop() ?? "" : "";
-	const line1 = alignRight(fitted.join(" "), fittedContext, width, theme);
-
-	const inlineLeftBudget = Math.floor(width * 0.45);
-	const inlineTopLeft = fitInlineSegments(inlineTopLeftParts, inlineLeftBudget, theme);
-	const inlineRightBudget = Math.max(0, width - visibleWidth(inlineTopLeft) - (inlineTopLeft ? 1 : 0));
-	const inlineTop: InlineFooterLine = {
-		left: inlineTopLeft,
-		right: fitInlineSegments(inlineTopRightParts, inlineRightBudget, theme),
-	};
-
-	const modelParts: string[] = [];
-	modelParts.push(theme.fg("mdLink", glyphs.model));
-	if (meta.provider && meta.provider !== "Unknown") {
-		modelParts.push(theme.fg(providerColor(ctx.model?.provider ?? "none"), meta.provider));
-	}
-	modelParts.push(theme.fg("text", meta.model));
-	if (meta.effort && meta.effort !== "off") {
-		modelParts.push(theme.fg(effortColor(meta.effort), `${glyphs.thinking} ${meta.effort}`));
-	}
-	const modelBlock = modelParts.join(theme.fg("dim", " · "));
-	const statsBlock = renderStatsBlock(theme, totals, glyphs, segments);
-	const inlineBottom = fitInlineLine(modelBlock, statsBlock, width, theme);
-	const line2 = alignRight(inlineBottom.left, inlineBottom.right, width, theme);
-	const mainLines: [string, string] = [line1, line2]
-		.map((line) => truncateToWidth(line, width, theme.fg("dim", "..."))) as [string, string];
-	const extensionLines = segments.extensionStatuses
-		? renderExtensionStatusLines(theme, footerData.getExtensionStatuses(), glyphs, width)
-		: [];
-	return { mainLines, inlineLines: { top: inlineTop, bottom: inlineBottom }, extensionLines };
-}
-
-export function installFooter(
-	ctx: ExtensionContext,
-	getState: () => FooterState,
-	getConfig: () => OpenTuiConfig,
-	getModelMeta: () => ModelMeta,
-	hooks: FooterHooks,
-): FooterHandle {
-	let renderInline: (width: number) => InlineFooterLines | undefined = () => undefined;
-
-	ctx.ui.setFooter((tui, theme, footerData) => {
-		hooks.setRequestRender(() => tui.requestRender());
-		const unsubBranch = footerData.onBranchChange(() => {
-			hooks.scheduleGitRefresh();
-			tui.requestRender();
-		});
-		const getContent = (width: number) => renderFooterContent(
-			ctx,
-			getState,
-			getConfig,
-			getModelMeta,
-			theme,
-			footerData,
-			width,
-			hooks.getLiveTps ?? (() => null),
-		);
-
-		renderInline = (width) => getContent(width).inlineLines;
-
-		return {
-			dispose() {
-				unsubBranch();
-				hooks.setRequestRender(undefined);
-				renderInline = () => undefined;
-			},
-			invalidate() {},
-			render(width: number): string[] {
-				if (width <= 0) return [""];
-				const { mainLines, extensionLines } = getContent(width);
-				return getConfig().inlineFooter ? extensionLines : [...mainLines, ...extensionLines];
-			},
-		};
-	});
-
-	return {
-		renderInline: (width) => renderInline(width),
-		cleanup() {
-			ctx.ui.setFooter(undefined);
-		},
-	};
 }

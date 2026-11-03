@@ -1,355 +1,148 @@
-import type {
-	AgentSettledEvent,
-	AgentStartEvent,
-	MessageEndEvent,
-	MessageStartEvent,
-	MessageUpdateEvent,
-	ToolExecutionStartEvent,
-	TurnEndEvent,
-	TurnStartEvent,
-	Theme,
-} from "@earendil-works/pi-coding-agent";
-import type { IconMode, TelemetryConfig } from "./config.ts";
-import { resolveGlyphs } from "./icons.ts";
-import { finiteOrZero, fmtTokens, formatDuration, formatInputBreakdown } from "./utils.ts";
+/**
+ * Per-run telemetry: live output rate while streaming, and a summary when the run ends
+ * (TPS, time to first token, duration, tokens, stalls, cost).
+ */
 
-const STALL_THRESHOLD_MS = 1000;
-// Live TPS is the rate over this trailing window, so it tracks current speed.
-const LIVE_TPS_WINDOW_MS = 2000;
-// CJK/kana/hangul/fullwidth: roughly one token per character in common tokenizers.
-const CJK_CHARS = /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]/g;
+import type { Usage } from "@earendil-works/pi-ai";
+import type { Theme } from "@earendil-works/pi-coding-agent";
+import type { Glyphs } from "./icons.ts";
+import { fmtDuration, fmtTokens } from "./format.ts";
 
-type TelemetryEvent =
-	| AgentStartEvent
-	| AgentSettledEvent
-	| TurnStartEvent
-	| MessageStartEvent
-	| MessageUpdateEvent
-	| MessageEndEvent
-	| ToolExecutionStartEvent
-	| TurnEndEvent;
-type AgentMessage = MessageStartEvent["message"];
-type AssistantMessage = Extract<AgentMessage, { role: "assistant" }>;
+const STALL_MS = 1000;
+const LIVE_WINDOW_MS = 2000;
+// CJK runs about one token per character; Latin text and code about four characters per token.
+const CJK = /[぀-ヿ㐀-鿿가-힯豈-﫿＀-￯]/g;
 
-interface MessageTiming {
-	lastUpdateMs: number;
-	firstOutputMs: number | null;
-	inStall: boolean;
-	estimatedTokens: number;
-	/** Cumulative estimate per delta; keeps one sample before the window as baseline. */
+export interface RunSummary {
+	durationMs: number;
+	ttftMs?: number;
+	tps?: number;
+	input: number;
+	output: number;
+	cost: number;
+	stalls: number;
+	stallMs: number;
+}
+
+interface Run {
+	start: number;
+	firstDelta?: number;
+	streamMs: number;
+	input: number;
+	output: number;
+	cost: number;
+	stalls: number;
+	stallMs: number;
+}
+
+interface Message {
+	first: number;
+	last: number;
+	stalled: boolean;
+	tokens: number;
 	samples: { ms: number; tokens: number }[];
 }
 
-interface TurnTiming {
-	startMs: number;
-	firstTokenMs: number | null;
-	currentMessage: MessageTiming | null;
-	messages: AssistantMessage[];
-	generationMs: number;
-	stallMs: number;
-	stallCount: number;
+function estimateTokens(text: string): number {
+	const cjk = text.match(CJK)?.length ?? 0;
+	return cjk + (text.length - cjk) / 4;
 }
 
-export interface TurnTelemetry {
-	tps: number | null;
-	ttftMs: number;
-	totalMs: number;
-	inputTokens: number;
-	outputTokens: number;
-	cacheReadTokens: number;
-	stallMs: number;
-	stallCount: number;
-	rateUsdPerMTokens: number | null;
-	generationMs: number;
-	totalTokens: number;
-	costUsd: number;
-	measurementMs: number | null;
-}
+export class Telemetry {
+	private run: Run | undefined;
+	private message: Message | undefined;
+	private lastTps: number | undefined;
 
-export interface LiveTps {
-	tps: number;
-	/** True between messages, when the value is the previous message's last rate. */
-	stale: boolean;
-}
+	/** A run spans every agent loop until pi settles, so a second start before finish() is a no-op. */
+	start(now = Date.now()): void {
+		if (this.run) return;
+		this.run = { start: now, streamMs: 0, input: 0, output: 0, cost: 0, stalls: 0, stallMs: 0 };
+		this.message = undefined;
+		this.lastTps = undefined;
+	}
 
-function isAssistantMessage(message: AgentMessage): message is AssistantMessage {
-	return message.role === "assistant";
-}
+	delta(text: string, now = Date.now()): void {
+		const run = this.run;
+		if (!run || !text) return;
+		run.firstDelta ??= now;
+		const tokens = estimateTokens(text);
+		const m = this.message;
+		if (!m) {
+			this.message = { first: now, last: now, stalled: false, tokens, samples: [{ ms: now, tokens }] };
+			return;
+		}
+		const gap = now - m.last;
+		if (gap >= STALL_MS) {
+			if (!m.stalled) run.stalls++;
+			run.stallMs += gap;
+		}
+		m.stalled = gap >= STALL_MS;
+		m.last = now;
+		m.tokens += tokens;
+		m.samples.push({ ms: now, tokens: m.tokens });
+		// Keep one sample older than the window as the baseline.
+		while (m.samples.length > 2 && m.samples[1]!.ms <= now - LIVE_WINDOW_MS) m.samples.shift();
+	}
 
-/** ~4 chars/token for Latin text and code, ~1 token per CJK character. */
-export function estimateDeltaTokens(delta: string): number {
-	const cjk = delta.match(CJK_CHARS)?.length ?? 0;
-	return cjk + (delta.length - cjk) / 4;
-}
-
-function round(value: number, decimals: number): number {
-	const factor = 10 ** decimals;
-	return Math.round(value * factor) / factor;
-}
-
-export class TurnTelemetryTracker {
-	private readonly now: () => number;
-	private turn: TurnTiming | undefined;
-	private agentStartMs: number | null = null;
-	private agentTurns: TurnTelemetry[] = [];
-	private lastLiveTps: number | null = null;
-
-	constructor(now: () => number = () => performance.now()) {
-		this.now = now;
+	messageEnd(usage: Usage | undefined, now = Date.now()): void {
+		const run = this.run;
+		if (!run) return;
+		if (this.message) {
+			run.streamMs += now - this.message.first;
+			this.lastTps = this.windowTps(now) ?? this.lastTps;
+		}
+		this.message = undefined;
+		if (!usage) return;
+		run.input += (usage.input ?? 0) + (usage.cacheWrite ?? 0);
+		run.output += usage.output ?? 0;
+		run.cost += usage.cost?.total ?? 0;
 	}
 
 	/**
-	 * Estimated output rate of the streaming message over the trailing window.
-	 * Between messages of a run (tools, TTFT) the last rate is kept as `stale`.
+	 * Estimated tokens/s over the last two seconds of the streaming message. Between messages
+	 * of a run (tools, waiting for the first token) the previous rate comes back as `stale`.
 	 */
-	getLiveTps(): LiveTps | null {
-		const tps = this.windowTps();
-		if (tps !== null) return { tps, stale: false };
-		return this.lastLiveTps === null ? null : { tps: this.lastLiveTps, stale: true };
+	liveTps(now = Date.now()): { tps: number; stale: boolean } | undefined {
+		const tps = this.windowTps(now);
+		if (tps !== undefined) return { tps, stale: false };
+		return this.lastTps === undefined ? undefined : { tps: this.lastTps, stale: true };
 	}
 
-	private windowTps(): number | null {
-		const samples = this.turn?.currentMessage?.samples;
-		if (!samples || samples.length < 2) return null;
-		const first = samples[0]!;
-		const now = this.now();
-		// Samples are only pruned on new deltas, so a stall longer than the window means no recent output.
-		if (now - samples.at(-1)!.ms >= LIVE_TPS_WINDOW_MS) return 0;
-		const elapsedMs = now - first.ms;
-		if (elapsedMs <= 0) return null;
-		return round((samples.at(-1)!.tokens - first.tokens) / (elapsedMs / 1000), 1);
+	private windowTps(now: number): number | undefined {
+		const samples = this.message?.samples;
+		if (!samples || samples.length < 2) return undefined;
+		if (now - samples.at(-1)!.ms >= LIVE_WINDOW_MS) return 0;
+		const elapsed = (now - samples[0]!.ms) / 1000;
+		return elapsed > 0 ? Math.round(((samples.at(-1)!.tokens - samples[0]!.tokens) / elapsed) * 10) / 10 : undefined;
 	}
 
-	handle(event: TelemetryEvent): TurnTelemetry | undefined {
-		switch (event.type) {
-			case "agent_start":
-				if (this.agentStartMs === null) {
-					this.agentStartMs = this.now();
-					this.agentTurns = [];
-					this.lastLiveTps = null;
-				}
-				return;
-			case "agent_settled":
-				return this.endAgent();
-			case "turn_start":
-				this.startTurn();
-				return;
-			case "message_start":
-				this.startMessage(event.message);
-				return;
-			case "message_update":
-				this.updateMessage(event);
-				return;
-			case "message_end":
-				this.endMessage(event.message);
-				return;
-			case "tool_execution_start":
-				return;
-			case "turn_end":
-				return this.endTurnAndCollect();
-		}
-	}
-
-	private startTurn(): void {
-		this.turn = {
-			startMs: this.now(),
-			firstTokenMs: null,
-			currentMessage: null,
-			messages: [],
-			generationMs: 0,
-			stallMs: 0,
-			stallCount: 0,
-		};
-	}
-
-	private startMessage(message: AgentMessage): void {
-		if (!this.turn || !isAssistantMessage(message)) return;
-		const now = this.now();
-		this.turn.currentMessage = {
-			lastUpdateMs: now,
-			firstOutputMs: null,
-			inStall: false,
-			estimatedTokens: 0,
-			samples: [],
-		};
-	}
-
-	private updateMessage(event: MessageUpdateEvent): void {
-		const turn = this.turn;
-		const current = turn?.currentMessage;
-		const streamEvent = event.assistantMessageEvent;
-		if (
-			streamEvent.type !== "text_delta" &&
-			streamEvent.type !== "thinking_delta" &&
-			streamEvent.type !== "toolcall_delta"
-		) return;
-		if (streamEvent.delta.length === 0) return;
-		const message = event.message;
-		if (!turn || !current || !isAssistantMessage(message)) return;
-
-		const now = this.now();
-		current.estimatedTokens += estimateDeltaTokens(streamEvent.delta);
-		const samples = current.samples;
-		samples.push({ ms: now, tokens: current.estimatedTokens });
-		while (samples.length > 2 && samples[1]!.ms <= now - LIVE_TPS_WINDOW_MS) samples.shift();
-
-		if (current.firstOutputMs === null) {
-			current.firstOutputMs = now;
-			turn.firstTokenMs ??= now;
-			current.lastUpdateMs = now;
-			return;
-		}
-
-		const gap = now - current.lastUpdateMs;
-		if (gap >= STALL_THRESHOLD_MS) {
-			if (!current.inStall) turn.stallCount++;
-			current.inStall = true;
-			turn.stallMs += gap;
-		} else {
-			current.inStall = false;
-		}
-		current.lastUpdateMs = now;
-	}
-
-	private endMessage(message: AgentMessage): void {
-		const turn = this.turn;
-		if (!turn || !isAssistantMessage(message)) return;
-
-		const current = turn.currentMessage;
-		if (current) {
-			const endMs = this.now();
-			turn.generationMs = endMs - turn.startMs;
-			if (current.firstOutputMs === null && finiteOrZero(message.usage?.output) > 0) {
-				turn.firstTokenMs ??= endMs;
-			}
-			this.lastLiveTps = this.windowTps() ?? this.lastLiveTps;
-			turn.currentMessage = null;
-		}
-		turn.messages.push(message);
-	}
-
-	private endTurnAndCollect(): TurnTelemetry | undefined {
-		const telemetry = this.endTurn();
-		if (telemetry && this.agentStartMs !== null) this.agentTurns.push(telemetry);
-		return telemetry;
-	}
-
-	private endTurn(): TurnTelemetry | undefined {
-		const turn = this.turn;
-		this.turn = undefined;
-		if (!turn || turn.firstTokenMs === null || turn.messages.length === 0) return;
-
-		const endMs = this.now();
-		let inputTokens = 0;
-		let outputTokens = 0;
-		let cacheReadTokens = 0;
-		let totalTokens = 0;
-		let costUsd = 0;
-		for (const message of turn.messages) {
-			// match /session's "uncached" total: cacheWrite is fresh, near-full-price
-			// content; only cacheRead is discounted repeat content.
-			inputTokens += finiteOrZero(message.usage?.input) + finiteOrZero(message.usage?.cacheWrite);
-			outputTokens += finiteOrZero(message.usage?.output);
-			cacheReadTokens += finiteOrZero(message.usage?.cacheRead);
-			totalTokens += finiteOrZero(message.usage?.totalTokens);
-			costUsd += finiteOrZero(message.usage?.cost?.total);
-		}
-
-		const measurementMs = outputTokens > 0 && turn.generationMs > 0 ? turn.generationMs : null;
-		const tps = measurementMs === null
-			? null
-			: round(outputTokens / (measurementMs / 1000), 1);
-		const validCost = Number.isFinite(costUsd) && costUsd > 0;
-		const validTokens = Number.isFinite(totalTokens) && totalTokens > 0;
+	finish(now = Date.now()): RunSummary | undefined {
+		const run = this.run;
+		this.run = undefined;
+		this.message = undefined;
+		this.lastTps = undefined;
+		if (!run || run.firstDelta === undefined) return undefined;
 		return {
-			tps,
-			ttftMs: turn.firstTokenMs - turn.startMs,
-			totalMs: endMs - turn.startMs,
-			inputTokens,
-			outputTokens,
-			cacheReadTokens,
-			stallMs: turn.stallMs,
-			stallCount: turn.stallCount,
-			rateUsdPerMTokens: validCost && validTokens
-				? round(costUsd / (totalTokens / 1_000_000), 2)
-				: null,
-			generationMs: turn.generationMs,
-			totalTokens,
-			costUsd: validCost ? costUsd : 0,
-			measurementMs,
-		};
-	}
-
-	private endAgent(): TurnTelemetry | undefined {
-		const startMs = this.agentStartMs;
-		const turns = this.agentTurns;
-		this.agentStartMs = null;
-		this.agentTurns = [];
-		this.lastLiveTps = null;
-		if (startMs === null || turns.length === 0) return;
-
-		const outputTokens = turns.reduce((sum, turn) => sum + turn.outputTokens, 0);
-		const inputTokens = turns.reduce((sum, turn) => sum + turn.inputTokens, 0);
-		const cacheReadTokens = turns.reduce((sum, turn) => sum + turn.cacheReadTokens, 0);
-		const totalTokens = turns.reduce((sum, turn) => sum + turn.totalTokens, 0);
-		const costUsd = turns.reduce((sum, turn) => sum + turn.costUsd, 0);
-		const stallMs = turns.reduce((sum, turn) => sum + turn.stallMs, 0);
-		const stallCount = turns.reduce((sum, turn) => sum + turn.stallCount, 0);
-		const generationMs = turns.reduce((sum, turn) => sum + turn.generationMs, 0);
-		const measurementMs = outputTokens > 0 && generationMs > 0 ? generationMs : null;
-		const tps = measurementMs === null
-			? null
-			: round(outputTokens / (measurementMs / 1000), 1);
-		const validRate = costUsd > 0 && totalTokens > 0;
-		return {
-			tps,
-			ttftMs: turns[0]!.ttftMs,
-			totalMs: this.now() - startMs,
-			inputTokens,
-			outputTokens,
-			cacheReadTokens,
-			stallMs,
-			stallCount,
-			rateUsdPerMTokens: validRate ? round(costUsd / (totalTokens / 1_000_000), 2) : null,
-			generationMs,
-			totalTokens,
-			costUsd,
-			measurementMs,
+			durationMs: now - run.start,
+			ttftMs: run.firstDelta - run.start,
+			tps: run.output > 0 && run.streamMs > 0 ? run.output / (run.streamMs / 1000) : undefined,
+			input: run.input,
+			output: run.output,
+			cost: run.cost,
+			stalls: run.stalls,
+			stallMs: run.stallMs,
 		};
 	}
 }
 
-function formatTurnDuration(ms: number): string {
-	return ms < 60_000 ? `${(ms / 1000).toFixed(1)}s` : formatDuration(ms);
-}
-
-export function formatTurnTelemetry(
-	telemetry: TurnTelemetry,
-	theme: Theme,
-	config: TelemetryConfig,
-	iconMode: IconMode,
-): string {
-	const glyphs = resolveGlyphs(iconMode);
-	const parts: string[] = [];
-	if (config.tps) {
-		const value = telemetry.tps === null ? "—" : `${telemetry.tps.toFixed(1)} tok/s`;
-		parts.push(theme.fg(telemetry.tps === null ? "muted" : "accent", `${glyphs.speed} TPS ${value}`));
-	}
-	if (config.ttft) {
-		parts.push(theme.fg("text", `${glyphs.latency} TTFT ${formatTurnDuration(telemetry.ttftMs)}`));
-	}
-	if (config.duration) {
-		parts.push(theme.fg("success", `${glyphs.done} ${formatTurnDuration(telemetry.totalMs)}`));
-	}
-	if (config.tokens) {
-		parts.push(theme.fg("accent", `${glyphs.input} ${formatInputBreakdown(telemetry.inputTokens, telemetry.cacheReadTokens)}`));
-		parts.push(theme.fg("success", `${glyphs.output} ${fmtTokens(telemetry.outputTokens)}`));
-	}
-	if (config.stalls && telemetry.stallMs > 0) {
-		parts.push(theme.fg("warning", `${glyphs.stall} stall ${telemetry.stallCount}x / ${formatTurnDuration(telemetry.stallMs)}`));
-	}
-	if (config.cost && telemetry.rateUsdPerMTokens !== null) {
-		parts.push(theme.fg("warning", `${glyphs.cost} $${telemetry.rateUsdPerMTokens.toFixed(2)}/M`));
-	}
-	return parts.join(` ${theme.fg("dim", "|")} `);
+export function formatSummary(s: RunSummary, theme: Theme, g: Glyphs): string {
+	const parts = [
+		theme.fg("accent", `${g.speed}${s.tps === undefined ? "—" : s.tps.toFixed(1)} tok/s`),
+		theme.fg("text", `${g.latency}TTFT ${fmtDuration(s.ttftMs ?? 0)}`),
+		theme.fg("success", g.done + fmtDuration(s.durationMs)),
+		theme.fg("muted", `${g.input}${fmtTokens(s.input)} ${g.output}${fmtTokens(s.output)}`),
+	];
+	if (s.stalls > 0) parts.push(theme.fg("warning", `${g.stall}${s.stalls}× ${fmtDuration(s.stallMs)}`));
+	if (s.cost > 0) parts.push(theme.fg("warning", g.cost + s.cost.toFixed(4)));
+	return parts.join(theme.fg("dim", g.sep));
 }
