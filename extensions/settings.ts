@@ -40,6 +40,7 @@ const SEGMENT_NAMES: Record<Segment, [string, string, string?, string?]> = {
 	gitCommit: ["Git 标签（分离 HEAD）", "Git tag (detached HEAD)", "分离 HEAD 时显示提交和标签", "Show commit and tag on a detached HEAD"],
 	runtime: ["运行时版本", "Runtime version", "按项目文件识别，如 node、bun、rust", "Detected from project files: node, bun, rust…"],
 	context: ["上下文占用", "Context usage"],
+	contextBar: ["上下文进度条", "Context bar", "关闭后只显示百分比和 token 用量", "Off keeps only the percentage and token usage"],
 	tokens: ["累计 token", "Token totals", "输入含未缓存与缓存读取拆分", "Input split into uncached and cache reads"],
 	cost: ["累计费用", "Cost"],
 	liveTps: ["实时 TPS", "Live TPS", "生成时显示输出速度", "Output rate while generating"],

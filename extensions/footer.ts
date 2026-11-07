@@ -226,13 +226,14 @@ function gitSegment(theme: Theme, git: GitStatus, g: FooterGlyphs, on: Config["f
 	return parts.join(" ");
 }
 
-/** Full context bar, and the icon + percentage form it falls back to. */
+/** Full context bar, and the icon + percentage form it falls back to; without the bar, the icon goes too. */
 function contextSegment(
 	theme: Theme,
 	ctx: ExtensionContext,
 	width: number,
 	g: FooterGlyphs,
 	ascii: boolean,
+	showBar: boolean,
 ): { full: string; compact: string } | undefined {
 	const usage = ctx.getContextUsage();
 	const window = usage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
@@ -243,6 +244,7 @@ function contextSegment(
 	const icon = theme.fg(color, g.context);
 	const pctText = theme.fg(color, `${pct.toFixed(1)}%`);
 	const size = `${theme.fg("text", fmtTokens(usage?.tokens ?? 0))}${theme.fg("dim", "/")}${theme.fg("text", fmtTokens(window))}`;
+	if (!showBar) return { full: `${pctText} ${theme.fg("dim", "·")} ${size}`, compact: pctText };
 	// The bar gives way before the left segments are squeezed.
 	const reserved = visibleWidth(icon) + visibleWidth(pctText) + visibleWidth(size) + 7;
 	const barWidth = Math.max(4, Math.min(12, width - reserved));
@@ -399,7 +401,7 @@ export class FooterInfo {
 			left.push({ text, compact: tps ? timer : undefined, priority: 3 });
 		}
 
-		const context = on.context ? contextSegment(theme, ctx, width, g, mode === "ascii") : undefined;
+		const context = on.context ? contextSegment(theme, ctx, width, g, mode === "ascii", on.contextBar) : undefined;
 		const all = [...left];
 		if (context) {
 			const compact = visibleWidth(context.compact) < visibleWidth(context.full) ? context.compact : undefined;
